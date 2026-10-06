@@ -8,6 +8,10 @@ Mở thư mục bằng VS Code và chạy `index.html` qua tiện ích Live Serv
 
 Firebase Authentication dùng Email/Password và Google. Hồ sơ vai trò đọc từ Firestore (`users/{uid}`); chủ sở hữu cấp quyền giáo viên tại mục **Học sinh**. Giáo viên có thể khóa hoặc mở lại quyền truy cập học sinh từ Firestore, không cần Cloud Functions. Khi trạng thái khóa được đồng bộ, học sinh bị đăng xuất; lần đăng nhập kế tiếp bị từ chối. Kho câu hỏi, đề giao và tóm tắt lượt làm hoàn thành được chia sẻ/đồng bộ qua Firestore. Bài làm dở và nội dung câu trả lời chi tiết không được đồng bộ.
 
+Bảy mã lỗi có mã và thứ tự cố định để giữ nguyên liên kết với câu hỏi và thống kê cũ; giáo viên có thể sửa tên/mô tả dùng chung tại trang **7 nhóm lỗi**. Cấu hình được lưu trong Firestore (`settings/errorCategories`) và cập nhật trực tiếp tới học sinh, giáo viên trên các thiết bị. Tài liệu tham khảo mã lỗi được lưu riêng theo tài khoản giáo viên (`errorDocs/{id}`), đồng bộ giữa thiết bị của giáo viên đó. Luồng nạp tài liệu trích xuất văn bản và cho giáo viên rà soát; PDF scan cần OCR trước.
+
+Giáo viên có thể xem hồ sơ và lượt làm của toàn bộ học sinh. Học sinh chỉ đọc hồ sơ và lượt làm của chính tài khoản mình theo Firestore Security Rules.
+
 ## Bật Firebase Authentication
 
 1. Dự án Firebase `toan-199ee` đã được chọn trong `.firebaserc` và cấu hình Web app từ Firebase Console đã được đặt trong `firebase-config.js`. Ảnh Console xác nhận Email/Password và Google đang bật trong Authentication.

@@ -20,6 +20,39 @@ service cloud.firestore {
         && (!get(profile).data.keys().hasAny(["accountStatus"])
           || get(profile).data.accountStatus == "active");
     }
+    match /settings/{settingId} {
+      function validCategory(category, code) {
+        return category is map
+          && category.keys().hasAll(["code", "name", "description"])
+          && category.keys().hasOnly(["code", "name", "description"])
+          && category.code == code
+          && category.name is string
+          && category.name.size() > 0
+          && category.name.size() <= 100
+          && category.description is string
+          && category.description.size() > 0
+          && category.description.size() <= 1600;
+      }
+      function validCategorySettings() {
+        return request.resource.data.keys().hasAll(["categories", "updatedAt", "updatedBy"])
+          && request.resource.data.keys().hasOnly(["categories", "updatedAt", "updatedBy"])
+          && request.resource.data.categories is list
+          && request.resource.data.categories.size() == 7
+          && validCategory(request.resource.data.categories[0], "KT")
+          && validCategory(request.resource.data.categories[1], "TT")
+          && validCategory(request.resource.data.categories[2], "PP")
+          && validCategory(request.resource.data.categories[3], "DG")
+          && validCategory(request.resource.data.categories[4], "SU")
+          && validCategory(request.resource.data.categories[5], "QT")
+          && validCategory(request.resource.data.categories[6], "MH")
+          && request.resource.data.updatedAt is string
+          && request.resource.data.updatedAt.size() <= 40
+          && request.resource.data.updatedBy == request.auth.uid;
+      }
+      allow read: if signedIn() && settingId == "errorCategories";
+      allow create, update: if signedIn() && staff() && settingId == "errorCategories" && validCategorySettings();
+      allow delete: if false;
+    }
     match /users/{userId} {
       allow read: if signedIn() && (request.auth.uid == userId || staff());
       allow create: if request.auth != null
@@ -174,8 +207,26 @@ service cloud.firestore {
     }
     match /errorDocs/{errorDocId} {
       allow read: if staff() && resource.data.teacherId == request.auth.uid;
-      allow create: if staff() && request.resource.data.teacherId == request.auth.uid;
-      allow update, delete: if staff() && resource.data.teacherId == request.auth.uid;
+      function validErrorDoc() {
+        return request.resource.data.keys().hasAll(["id", "teacherId", "name", "summary", "text", "createdAt"])
+          && request.resource.data.keys().hasOnly(["id", "teacherId", "name", "summary", "text", "createdAt"])
+          && request.resource.data.id == errorDocId
+          && request.resource.data.teacherId == request.auth.uid
+          && request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.name.size() <= 200
+          && request.resource.data.summary is string
+          && request.resource.data.summary.size() <= 1000
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 40000
+          && request.resource.data.createdAt is string
+          && request.resource.data.createdAt.size() <= 40;
+      }
+      allow create: if staff() && validErrorDoc();
+      allow update: if staff() && resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherId == resource.data.teacherId && validErrorDoc();
+      allow delete: if staff() && resource.data.teacherId == request.auth.uid;
     }
   }
 }

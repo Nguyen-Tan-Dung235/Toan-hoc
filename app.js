@@ -1,7 +1,8 @@
 const FIREBASE_CONFIG = window.FIREBASE_CONFIG || null;
 const STORE_KEY = "toan-mach-data-v1";
+const LEGACY_ERROR_DOCS_KEY = "toan-mach-error-docs-to-import-v1";
 const SESSION_KEY = "toan-mach-session-v1";
-const errors = [
+const DEFAULT_ERRORS = [
   ["KT", "Lỗi kiến thức", "Chưa nắm đúng khái niệm, định nghĩa, tính chất, công thức hoặc điều kiện áp dụng định lý; ví dụ nhầm điểm cực trị của hàm số với điểm cực trị của đồ thị."],
   ["TT", "Lỗi tính toán, biến đổi", "Đã chọn được hướng giải nhưng tính chưa chính xác: sai đạo hàm, sai dấu, sai phép biến đổi hoặc tính sai giới hạn."],
   ["PP", "Lỗi lựa chọn và vận dụng phương pháp", "Chưa chọn được phương pháp phù hợp với yêu cầu hoặc vận dụng phương pháp sai, thường gặp trong bài toán thực tế."],
@@ -10,6 +11,7 @@ const errors = [
   ["QT", "Lỗi quy trình giải toán", "Thiếu bước trong trình tự giải như xác định điều kiện, kiểm tra nghiệm, xét trường hợp đặc biệt hoặc kiểm tra kết quả."],
   ["MH", "Lỗi mô hình hóa toán học", "Chuyển tình huống thực tế sang biến, điều kiện, phương trình hoặc bất phương trình chưa đúng."]
 ];
+let errors = structuredClone(DEFAULT_ERRORS);
 const icons = {
   home:'<rect x="3" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="15" width="7" height="6" rx="1.5"/>',
   book:'<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/><path d="M8 7h8M8 11h7"/>',
@@ -43,10 +45,21 @@ const sample = {
     {id:"a3",title:"Hình học không gian — Bài 2",questions:30,students:12,due:"09/10/2026",state:"Đã đóng",sections:["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"]}
   ],
   questions: [],
-  attempts: []
+  attempts: [],
+  errorDocs: []
 };
 let data = loadData();
 let session = loadSession();
+let legacyErrorDocs=[];
+try { legacyErrorDocs=JSON.parse(localStorage.getItem(LEGACY_ERROR_DOCS_KEY)||"[]");if(!Array.isArray(legacyErrorDocs))legacyErrorDocs=[]; }
+catch { legacyErrorDocs=[]; }
+if(session?.source==="firebase"&&data.errorDocs?.length) {
+  legacyErrorDocs=mergeLegacyErrorDocs(legacyErrorDocs,data.errorDocs);
+  data.errorDocs=[];
+  saveData();
+  persistLegacyErrorDocs();
+}
+if(session?.source==="firebase")data.errorDocs=[];
 let currentPage = "home";
 let currentPractice = null;
 let practiceReturnPage = "home";
@@ -65,6 +78,10 @@ let attemptUnsubscribe = null;
 let attemptSyncGeneration = 0;
 let profileUnsubscribe = null;
 let profileSyncGeneration = 0;
+let errorCategoryUnsubscribe = null;
+let errorCategorySyncGeneration = 0;
+let errorDocsUnsubscribe = null;
+let errorDocsSyncGeneration = 0;
 let registeringFirebaseAccount = false;
 let loginRole = "student";
 let currentQuestionIndex = 0;
@@ -87,7 +104,7 @@ function loadData() {
 }
 function saveData() {
   const persisted=session?.source==="firebase"
-    ?{...data,users:[],sets:[],questions:[],assignments:[]}
+    ?{...data,users:[],sets:[],questions:[],assignments:[],errorDocs:[]}
     :data;
   try { localStorage.setItem(STORE_KEY, JSON.stringify(persisted)); }
   catch(error) {
@@ -100,7 +117,21 @@ function saveData() {
 function loadSession() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch { return null; }
 }
+function mergeLegacyErrorDocs(existing,incoming) {
+  const byId=new Map((existing||[]).map(item=>[String(item.id||`${item.name}-${item.text}`),item]));
+  for(const item of incoming||[])byId.set(String(item.id||`${item.name}-${item.text}`),item);
+  return [...byId.values()];
+}
+function persistLegacyErrorDocs() {
+  try { localStorage.setItem(LEGACY_ERROR_DOCS_KEY,JSON.stringify(legacyErrorDocs));return true; }
+  catch(error) { console.warn("Could not preserve the old local error documents.",error);return false; }
+}
 function setSession(user) {
+  const identityChanged=!user||session?.id!==user.id||session?.source!==user.source;
+  const oldLocalErrorDocs=identityChanged&&user?.source==="firebase"&&session?.source!=="firebase"?data.errorDocs||[]:[];
+  if(oldLocalErrorDocs.length) {
+    legacyErrorDocs=mergeLegacyErrorDocs(legacyErrorDocs,data.errorDocs);
+  }
   if(profileUnsubscribe&&(!user||session?.id!==user.id||session?.source!==user.source)) {
     profileUnsubscribe();
     profileUnsubscribe=null;
@@ -111,7 +142,15 @@ function setSession(user) {
     attemptUnsubscribe=null;
     attemptSyncGeneration++;
   }
+  if(identityChanged&&errorCategoryUnsubscribe) {
+    errorCategoryUnsubscribe();errorCategoryUnsubscribe=null;errorCategorySyncGeneration++;
+  }
+  if(identityChanged&&errorDocsUnsubscribe) {
+    errorDocsUnsubscribe();errorDocsUnsubscribe=null;errorDocsSyncGeneration++;
+  }
+  if(identityChanged)data.errorDocs=[];
   session = user;
+  if(identityChanged&&user?.source==="firebase") { saveData();if(oldLocalErrorDocs.length)persistLegacyErrorDocs(); }
   if(user)loginNotice="";
   if(user?.source==="firebase"&&user.role==="student") {
     data.sets=[];
@@ -128,6 +167,8 @@ function setSession(user) {
     void loadFirebaseAssignments();
     void loadFirebaseQuestionSets();
     void loadFirebaseAttempts();
+    void loadFirebaseErrorCategories();
+    void loadFirebaseErrorDocs();
     void watchFirebaseAccount(user.id);
   }
 }
@@ -226,6 +267,92 @@ function firebaseRequest(request) {
     },6000);
     request.then(value=>{clearTimeout(timeout);resolve(value);},error=>{clearTimeout(timeout);reject(error);});
   });
+}
+function normalizeErrorCategories(categories) {
+  const entries=Array.isArray(categories)?categories:[];
+  const byCode=new Map(entries.map(category=>{
+    const item=Array.isArray(category)
+      ?{code:category[0],name:category[1],description:category[2]}
+      :category||{};
+    return [String(item.code||""),item];
+  }));
+  return DEFAULT_ERRORS.map(([code,defaultName,defaultDescription])=>{
+    const item=byCode.get(code)||{};
+    const name=typeof item.name==="string"&&item.name.trim()?item.name.trim().slice(0,100):defaultName;
+    const description=typeof item.description==="string"&&item.description.trim()?item.description.trim().slice(0,1600):defaultDescription;
+    return [code,name,description];
+  });
+}
+async function loadFirebaseErrorCategories() {
+  if(!session?.id||session.source!=="firebase")return false;
+  const userId=session.id,generation=++errorCategorySyncGeneration;
+  errorCategoryUnsubscribe?.();errorCategoryUnsubscribe=null;
+  try {
+    await configureFirestore();
+    if(generation!==errorCategorySyncGeneration||session?.id!==userId)return false;
+    const ref=firebaseSdk.doc(firebaseDb,"settings","errorCategories");
+    errorCategoryUnsubscribe=firebaseSdk.onSnapshot(ref,snapshot=>{
+      if(generation!==errorCategorySyncGeneration||session?.id!==userId)return;
+      const next=snapshot.exists()?normalizeErrorCategories(snapshot.data().categories):structuredClone(DEFAULT_ERRORS);
+      if(JSON.stringify(next)===JSON.stringify(errors))return;
+      errors=next;
+      if(!document.querySelector(".modal-backdrop")) {
+        if(currentPractice)renderPractice();else render();
+      }
+    },error=>{
+      console.error("Shared error category listener failed.",error);
+      toast(`Không đồng bộ được nội dung 7 mã lỗi: ${firebaseFirestoreError(error)}`);
+    });
+    return true;
+  } catch(error) {
+    console.error("Could not load shared error categories.",error);
+    toast(`Không tải được nội dung 7 mã lỗi: ${firebaseFirestoreError(error)}`);
+    return false;
+  }
+}
+async function updateErrorCategory(code,name,description) {
+  if(!isTeacher()||session?.source!=="firebase")throw new Error("Chỉ giáo viên đăng nhập Firebase mới có thể sửa nội dung dùng chung.");
+  const defaultCategory=DEFAULT_ERRORS.find(category=>category[0]===code);
+  if(!defaultCategory)throw new Error("Mã lỗi không hợp lệ.");
+  const normalizedName=String(name||"").trim(),normalizedDescription=String(description||"").trim();
+  if(!normalizedName||normalizedName.length>100)throw new Error("Tên mã lỗi cần có từ 1 đến 100 ký tự.");
+  if(!normalizedDescription||normalizedDescription.length>1600)throw new Error("Mô tả cần có từ 1 đến 1.600 ký tự.");
+  await configureFirestore();
+  const ref=firebaseSdk.doc(firebaseDb,"settings","errorCategories");
+  await firebaseRequest(firebaseSdk.runTransaction(firebaseDb,async transaction=>{
+    const snapshot=await transaction.get(ref);
+    const current=snapshot.exists()?normalizeErrorCategories(snapshot.data().categories):structuredClone(DEFAULT_ERRORS);
+    const updated=current.map(category=>category[0]===code?[code,normalizedName,normalizedDescription]:category);
+    transaction.set(ref,{
+      categories:updated.map(([categoryCode,categoryName,categoryDescription])=>({code:categoryCode,name:categoryName,description:categoryDescription})),
+      updatedAt:new Date().toISOString(),updatedBy:session.id
+    });
+  }));
+}
+async function loadFirebaseErrorDocs() {
+  if(!session?.id||session.source!=="firebase"||!isTeacher())return false;
+  const userId=session.id,generation=++errorDocsSyncGeneration;
+  errorDocsUnsubscribe?.();errorDocsUnsubscribe=null;data.errorDocs=[];
+  try {
+    await configureFirestore();
+    if(generation!==errorDocsSyncGeneration||session?.id!==userId)return false;
+    const docs=firebaseSdk.collection(firebaseDb,"errorDocs");
+    const query=firebaseSdk.query(docs,firebaseSdk.where("teacherId","==",userId));
+    errorDocsUnsubscribe=firebaseSdk.onSnapshot(query,snapshot=>{
+      if(generation!==errorDocsSyncGeneration||session?.id!==userId)return;
+      data.errorDocs=snapshot.docs.map(document=>({id:document.id,...document.data()}))
+        .sort((a,b)=>String(b.createdAt||"").localeCompare(String(a.createdAt||"")));
+      if(currentPage==="errors"&&!document.querySelector(".modal-backdrop"))render();
+    },error=>{
+      console.error("Teacher error document listener failed.",error);
+      toast(`Không đồng bộ được tài liệu mã lỗi: ${firebaseFirestoreError(error)}`);
+    });
+    return true;
+  } catch(error) {
+    console.error("Could not load teacher error documents.",error);
+    toast(`Không tải được tài liệu mã lỗi: ${firebaseFirestoreError(error)}`);
+    return false;
+  }
 }
 function firebaseProfileError(error) {
   const wrapped=new Error(firebaseFirestoreError(error));
@@ -813,10 +940,12 @@ function studentsTable(users,clickable) {
   return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>ĐỀ ĐÃ LÀM</th><th>ĐIỂM TRUNG BÌNH</th><th>NHÓM CẦN ƯU TIÊN</th><th>TIẾN BỘ</th><th></th></tr></thead><tbody>${users.map(u=>{const s=userStats(u),worst=topError(s.counts),completed=s.attempts.length||s.scores.length;return `<tr ${clickable?`data-action="select-student" data-id="${u.id}" style="cursor:pointer"`:""}><td><div class="student-cell"><div class="avatar">${initial(u.name)}</div><div><strong>${safe(u.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(u.email)}</div></div></div></td><td>${completed} đề</td><td><strong>${s.average}</strong>/10</td><td><span class="priority">${worst[0]} · ${worst[1]}</span></td><td><span class="progress-track"><i style="width:${Math.min(100,(Number(s.latest)||0)*10)}%"></i></span>${s.latest||"—"}/10</td><td><span style="color:#9aa3b3">→</span></td></tr>`}).join("")}</tbody></table></div>`;
 }
 function errorsPage() {
-  return `${welcome("7 nhóm lỗi thường gặp","Tải tài liệu phân loại lỗi để xây dựng kho mã lỗi cho lớp học.",`<button class="btn" data-action="upload-errors">${icon("upload")} Tải file mã lỗi</button>`)}
-  <div class="grid stats">${statCard("Nhóm lỗi","07","","target","purple","Các nhóm đang áp dụng")}${statCard("Tài liệu phân tích",data.errorDocs?.length||0,"","file","green","Tài liệu giáo viên đã tải")}${statCard("Mã lỗi đang dùng",errors.length,"","book","orange","Phân loại câu hỏi")}${statCard("Câu hỏi đã gắn mã",data.questions.filter(q=>q.errorId).length,"","chart","blue","Trong kho câu hỏi")}</div>
-  <div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">${errors.map((e,i)=>`<div class="card section-card"><div class="error-head"><div><div class="eyebrow">MÃ LỖI ${e[0]}</div><h2 style="font-size:13px;margin:0">${e[1]}</h2></div><span class="error-count">${aggregateMistakes(data.users.filter(u=>u.role==="student"))[i]} lần</span></div><p style="font-size:9px;color:#919bad;line-height:1.7;margin:10px 0 0">${e[2]}</p></div>`).join("")}</div>
-  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Tài liệu mã lỗi đã tải lên</h2><p>Phân tích nội dung văn bản và lưu tóm tắt tại đây</p></div></div>${data.errorDocs?.length?`<div class="assignment-list">${data.errorDocs.map(d=>`<div class="assignment"><div class="assignment-mark">${icon("file")}</div><div class="assignment-details"><strong>${safe(d.name)}</strong><span>${safe(d.summary)}</span></div><span class="tag">Đã phân tích</span></div>`).join("")}</div>`:`<div class="empty">Chưa có tài liệu mã lỗi. Tải file .docx hoặc .txt để thêm nội dung phân loại.</div>`}</div>`;
+  const teacher=isTeacher();
+  const legacyNotice=teacher&&session?.source==="firebase"&&legacyErrorDocs.length?`<div class="legacy-error-notice"><div><strong>Tìm thấy ${legacyErrorDocs.length} tài liệu cũ trên thiết bị này</strong><p>Chúng chưa được gắn với tài khoản giáo viên nào. Bạn có thể xác nhận trước khi chuyển chúng sang tài khoản ${safe(userName())}.</p></div><button class="btn secondary" data-action="import-legacy-error-docs">Rà soát và chuyển</button></div>`:"";
+  return `${welcome("7 nhóm lỗi thường gặp","Sửa tên và mô tả ngay tại đây. Nội dung được chia sẻ đồng bộ giữa giáo viên.",`<button class="btn" data-action="upload-errors">${icon("upload")} Nạp tài liệu mã lỗi</button>`)}
+  <div class="grid stats">${statCard("Nhóm lỗi","07","","target","purple","Mã và thứ tự được giữ ổn định")}${statCard("Tài liệu phân tích",data.errorDocs?.length||0,"","file","green","Tài liệu của giáo viên này")}${statCard("Mã lỗi đang dùng",errors.length,"","book","orange","Phân loại câu hỏi")}${statCard("Câu hỏi đã gắn mã",data.questions.filter(q=>q.errorId).length,"","chart","blue","Trong kho câu hỏi")}</div>
+  ${legacyNotice}<div class="error-groups">${errors.map((e,i)=>`<article class="card section-card error-group" data-error-code="${e[0]}"><div class="error-display"><div class="error-head"><div><div class="eyebrow">MÃ LỖI ${e[0]}</div><h2 class="error-name">${safe(e[1])}</h2></div><div class="error-card-actions"><span class="error-count">${aggregateMistakes(data.users.filter(u=>u.role==="student"))[i]} lần</span>${teacher?`<button class="text-button" type="button" data-action="edit-error-category" data-id="${e[0]}">Sửa nội dung</button>`:""}</div></div><p class="error-description">${safe(e[2])}</p></div>${teacher?`<div class="error-edit-form" hidden><label>Tên nhóm lỗi<input class="error-name-input" maxlength="100" value="${safe(e[1])}"/></label><label>Mô tả nhóm lỗi<textarea class="error-description-input" maxlength="1600" rows="4">${safe(e[2])}</textarea></label><div class="error-edit-actions"><button class="btn" type="button" data-action="save-error-category" data-id="${e[0]}">Lưu thay đổi</button><button class="btn secondary" type="button" data-action="cancel-error-edit" data-id="${e[0]}">Hủy</button></div><small>Mã ${e[0]} và vị trí thống kê được giữ nguyên để bảo toàn dữ liệu cũ.</small></div>`:""}</article>`).join("")}</div>
+  <div class="card section-card error-docs-panel"><div class="section-heading"><div><h2>Tài liệu mã lỗi đã nạp</h2><p>Tài liệu được lưu cho tài khoản giáo viên và đồng bộ giữa các thiết bị</p></div></div>${data.errorDocs?.length?`<div class="assignment-list">${data.errorDocs.map(d=>`<article class="assignment"><div class="assignment-mark">${icon("file")}</div><div class="assignment-details"><strong>${safe(d.name)}</strong><span>${safe(d.summary)}</span></div><span class="tag">${d.text?.length||0} ký tự</span></article>`).join("")}</div>`:`<div class="empty">Chưa có tài liệu. Nạp Word, PDF có lớp văn bản hoặc tệp TXT; nội dung sẽ được rà soát trước khi lưu.</div>`}</div>`;
 }
 function libraryPage() {
   const sets=data.sets||[];
@@ -858,6 +987,59 @@ function bindApp() {
 }
 async function handleAction(button) {
   const action=button.dataset.action,id=button.dataset.id;
+  if(action==="edit-error-category") {
+    if(!isTeacher())return;
+    const card=button.closest(".error-group");
+    if(card){card.querySelector(".error-display").hidden=true;card.querySelector(".error-edit-form").hidden=false;card.querySelector(".error-name-input").focus();}
+    return;
+  }
+  if(action==="cancel-error-edit") {
+    const card=button.closest(".error-group");
+    if(card){card.querySelector(".error-edit-form").hidden=true;card.querySelector(".error-display").hidden=false;}
+    return;
+  }
+  if(action==="save-error-category") {
+    if(!isTeacher()){toast("Chỉ giáo viên mới được sửa nội dung mã lỗi.");return;}
+    const card=button.closest(".error-group"),name=card?.querySelector(".error-name-input")?.value,description=card?.querySelector(".error-description-input")?.value;
+    if(!card)return;
+    button.disabled=true;button.textContent="Đang đồng bộ…";
+    try {
+      await updateErrorCategory(id,name,description);
+      errors=errors.map(category=>category[0]===id?[id,name.trim(),description.trim()]:category);
+      render();toast(`Đã cập nhật mã ${id} cho giáo viên và học sinh.`);
+    } catch(error) {
+      console.error("Could not update shared error category.",error);
+      button.disabled=false;button.textContent="Lưu thay đổi";
+      toast(error.code?`Không lưu được nội dung mã lỗi: ${firebaseFirestoreError(error)}`:error.message);
+    }
+    return;
+  }
+  if(action==="import-legacy-error-docs") {
+    if(!isTeacher()||session?.source!=="firebase"){toast("Hãy đăng nhập tài khoản giáo viên Firebase để chuyển tài liệu.");return;}
+    if(!legacyErrorDocs.length)return;
+    const names=legacyErrorDocs.map(doc=>doc.name||"Tài liệu chưa đặt tên").join("\n• ");
+    if(!confirm(`Chuyển ${legacyErrorDocs.length} tài liệu cũ vào tài khoản ${userName()}?\n\n• ${names}\n\nCác bản cũ chỉ có trên thiết bị này; thao tác này gắn chúng với tài khoản đang đăng nhập.`))return;
+    button.disabled=true;button.textContent="Đang chuyển…";
+    try {
+      await configureFirestore();
+      const migrated=[];
+      for(const old of legacyErrorDocs) {
+        const safeId=String(old.id||crypto.randomUUID?.()||Date.now()).replace(/[^A-Za-z0-9_-]/g,"_").slice(0,100);
+        const record={id:`e-legacy-${session.id}-${safeId}`,teacherId:session.id,name:String(old.name||"Tài liệu mã lỗi cũ").slice(0,200),summary:String(old.summary||summarizeErrors(old.text||"")).slice(0,1000),text:String(old.text||"").slice(0,40000),createdAt:typeof old.createdAt==="string"?old.createdAt:new Date().toISOString()};
+        if(!record.text.trim())continue;
+        await firebaseRequest(firebaseSdk.setDoc(firebaseSdk.doc(firebaseDb,"errorDocs",record.id),record));
+        migrated.push(record);
+      }
+      data.errorDocs=[...migrated,...(data.errorDocs||[])];
+      legacyErrorDocs=[];persistLegacyErrorDocs();saveData();render();
+      toast(`Đã chuyển ${migrated.length} tài liệu cũ vào tài khoản giáo viên này.`);
+    } catch(error) {
+      console.error("Could not migrate old local error documents.",error);
+      button.disabled=false;button.textContent="Chuyển vào tài khoản này";
+      toast(`Chưa chuyển hết tài liệu: ${firebaseFirestoreError(error)}. Bạn có thể thử lại; các bản đã chuyển sẽ không bị nhân đôi.`);
+    }
+    return;
+  }
   if(action==="logout") {
     if(firebaseAuth) try {await firebaseSdk.signOut(firebaseAuth);}catch(e){toast(firebaseError(e));return;}
     sessionNotice="";
@@ -866,7 +1048,7 @@ async function handleAction(button) {
   if(action==="help"){toast("Tải đề Word vào Kho câu hỏi, rồi chọn câu để tạo đề ôn tập.");return;}
   if(action==="upload-doc"){
     if(!isTeacher()){toast("Chỉ giáo viên mới được tải đề lên kho dùng chung.");return;}
-    showUploadModal("questions");return;
+    showUploadModal();return;
   }
   if(action==="upload-errors"){
     if(!isTeacher()){toast("Chỉ giáo viên mới được tải tài liệu mã lỗi lên.");return;}
@@ -1034,15 +1216,102 @@ function showModal(title,body,actions="") {
   });
   void typesetMath(document.querySelector(".modal"));
 }
-function showUploadModal(kind) {
-  const errorsOnly=kind==="errors";
+async function extractDocumentText(file) {
+  const extension=file.name.split(".").pop().toLowerCase();
+  if(extension==="txt")return (await file.text()).replace(/\r\n?/g,"\n").trim();
+  if(extension==="pdf") {
+    const parsed=await parsePdfDocument(file,{analyzeQuestions:false});
+    try {
+      const doc=new DOMParser().parseFromString(parsed.html||"","text/html");
+      return [...doc.body.children].map(node=>node.textContent.replace(/\s+/g," ").trim()).filter(Boolean).join("\n");
+    } finally {
+      parsed.pages?.forEach(source=>source.page.cleanup());
+      await parsed.document?.destroy().catch(()=>{});
+    }
+  }
+  if(extension==="docx") {
+    let mammoth=window.mammoth;
+    if(!mammoth?.convertToHtml) {
+      await import("https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js");
+      mammoth=window.mammoth;
+    }
+    if(!mammoth?.convertToHtml||!mammoth.images?.imgElement)throw new Error("Không tải được bộ đọc Word từ CDN. Kiểm tra kết nối Internet rồi thử lại.");
+    const prepared=await prepareWordFile(file);
+    const result=await mammoth.convertToHtml({arrayBuffer:prepared.arrayBuffer},{convertImage:mammoth.images.imgElement(image=>image.read("base64").then(data=>({src:`data:${image.contentType};base64,${data}`})))});
+    const html=replaceMathPlaceholders(result.value,prepared.mathMarkup);
+    const doc=new DOMParser().parseFromString(sanitizeDocumentHtml(html),"text/html");
+    const blocks=[...doc.body.querySelectorAll("p,h1,h2,h3,h4,li,tr,pre")].map(node=>
+      node.tagName==="TR"?[...node.children].map(cell=>cell.textContent.trim()).filter(Boolean).join(" | "):node.textContent.trim()
+    ).filter(Boolean);
+    return (blocks.length?blocks: [doc.body.textContent]).join("\n").trim();
+  }
+  throw new Error("Chỉ hỗ trợ file .docx, .pdf có lớp văn bản hoặc .txt.");
+}
+function showErrorUploadModal() {
   let parseSequence=0;
-  showModal(errorsOnly?"Tải tài liệu nhóm lỗi":"Tải đề Toán từ Word hoặc PDF",
-    `<p class="subhead" style="margin:0 0 14px">${errorsOnly?"Tải tài liệu mô tả các nhóm lỗi để lưu trữ và tóm tắt.":"Hệ thống giữ ảnh, hình vẽ và công thức Word; PDF được tách theo nội dung văn bản và lưu ảnh chụp từng câu để đối chiếu."}</p>
-    <label class="upload-zone" for="doc-file" tabindex="0">${icon("upload")}<strong>Chọn hoặc kéo thả file vào đây</strong><span>Định dạng hỗ trợ .docx, .pdf${errorsOnly?" hoặc .txt":""} · Tối đa 15 MB</span><input id="doc-file" type="file" accept=".docx,.pdf,.txt"/></label>
+  showModal("Nạp và rà soát tài liệu mã lỗi",
+    `<div class="review-workspace error-doc-workspace"><aside class="review-sidebar"><p class="subhead">Tài liệu sẽ được trích xuất thành văn bản để giáo viên kiểm tra trước khi lưu. Luồng này không tách nội dung thành câu hỏi.</p><label class="upload-zone" for="error-doc-file" tabindex="0">${icon("upload")}<strong>Chọn hoặc kéo thả tài liệu</strong><span>Word, PDF có lớp văn bản hoặc TXT · Tối đa 15 MB</span><input id="error-doc-file" type="file" accept=".docx,.pdf,.txt"/></label><div class="field"><label for="doc-title">Tên tài liệu</label><input id="doc-title" placeholder="Ví dụ: Hướng dẫn phân loại 7 mã lỗi"/></div><div class="notice">Tài liệu chỉ lưu làm nguồn tham khảo cho giáo viên này. Tên và mô tả 7 mã lỗi được chỉnh riêng ở các thẻ bên dưới trang.</div></aside><section class="review-main"><div id="doc-preview" class="error-doc-review"><div class="error-doc-empty"><div class="empty-icon">${icon("file")}</div><strong>Chưa có văn bản để rà soát</strong><p>Chọn tài liệu ở cột bên trái; nội dung trích xuất sẽ hiện tại đây để bạn chỉnh trước khi lưu.</p></div></div></section></div>`,
+    `<button class="btn secondary" data-action="close-modal">Hủy</button><button class="btn" id="save-upload" disabled>Lưu tài liệu</button>`);
+  const modal=document.querySelector(".modal"),input=document.querySelector("#error-doc-file"),zone=document.querySelector(".error-doc-workspace .upload-zone"),preview=document.querySelector("#doc-preview"),saveButton=document.querySelector("#save-upload");
+  modal?.classList.add("modal-review");
+  const processFile=async file=>{
+    if(!file)return;
+    if(file.size>15*1024*1024){toast("File vượt quá giới hạn 15 MB.");return;}
+    if(!/\.(?:docx|pdf|txt)$/i.test(file.name)){toast("Chỉ hỗ trợ file .docx, .pdf hoặc .txt.");return;}
+    const sequence=++parseSequence;
+    if(!document.querySelector(".modal-backdrop")?.isConnected)return;
+    const title=document.querySelector("#doc-title");if(!title.value)title.value=file.name.replace(/\.[^.]+$/,"");
+    pendingUpload=null;saveButton.disabled=true;
+    preview.innerHTML=`<div class="error-doc-loading"><span class="loading-orbit"></span><strong>Đang trích xuất văn bản…</strong><p>Tệp được xử lý trong trình duyệt.</p></div>`;
+    try {
+      const text=await extractDocumentText(file);
+      const backdrop=document.querySelector(".modal-backdrop");
+      if(!backdrop?.isConnected||sequence!==parseSequence)return;
+      if(!text.trim())throw new Error("Không tìm thấy văn bản. PDF scan cần được OCR trước khi nạp.");
+      pendingUpload={kind:"errors",file,parsed:{text}};
+      const maxLength=40000,shownText=text.slice(0,maxLength),truncated=text.length>maxLength;
+      preview.innerHTML=`<div class="review-summary error-doc-summary"><b>${safe(file.name)}</b><span>${text.length.toLocaleString("vi-VN")} ký tự trích xuất</span><span id="error-doc-code-summary">${safe(summarizeErrors(shownText))}</span></div>${truncated?'<p class="notice">Tài liệu dài hơn giới hạn 40.000 ký tự; phần đang hiển thị sẽ được lưu. Hãy kiểm tra cuối văn bản trước khi xác nhận.</p>':""}<label class="field full error-doc-text-field"><span>Văn bản trích xuất — có thể chỉnh sửa trước khi lưu</span><textarea id="error-document-text" class="error-document-text" maxlength="40000" spellcheck="false">${safe(shownText)}</textarea><small><span data-error-doc-length>${shownText.length.toLocaleString("vi-VN")}</span> / 40.000 ký tự</small></label>`;
+      preview.querySelector("#error-document-text").addEventListener("input",event=>{
+        const value=event.currentTarget.value;
+        preview.querySelector("[data-error-doc-length]").textContent=value.length.toLocaleString("vi-VN");
+        preview.querySelector("#error-doc-code-summary").textContent=summarizeErrors(value);
+        pendingUpload.parsed.text=value;
+      });
+      zone.querySelector("strong").textContent="Chọn tài liệu khác";
+      zone.querySelector("span").textContent=file.name;
+      saveButton.disabled=false;
+    } catch(error) {
+      if(!document.querySelector(".modal-backdrop")?.isConnected||sequence!==parseSequence)return;
+      pendingUpload=null;
+      preview.innerHTML=`<div class="error-doc-empty"><strong>Chưa trích xuất được văn bản</strong><p>${safe(error.message.includes("lớp văn bản")?"PDF scan không có lớp chữ để trích xuất. Hãy OCR trước hoặc dán nội dung từ một tệp TXT/Word vào quy trình này.":error.message)}</p></div>`;
+      toast(`Không đọc được tài liệu: ${error.message}`);
+    }
+  };
+  input.onchange=()=>processFile(input.files[0]);
+  zone.addEventListener("dragover",event=>{event.preventDefault();zone.classList.add("is-dragover");});
+  zone.addEventListener("dragleave",event=>{if(!zone.contains(event.relatedTarget))zone.classList.remove("is-dragover");});
+  zone.addEventListener("drop",event=>{event.preventDefault();zone.classList.remove("is-dragover");processFile(event.dataTransfer.files[0]);});
+  saveButton.onclick=async event=>{
+    const button=event.currentTarget,label=button.textContent;
+    if(button.disabled)return;
+    button.disabled=true;button.textContent="Đang lưu…";
+    try { await saveUploadedDoc(true); }
+    catch(error) {
+      console.error("Could not save teacher error document.",error);
+      toast(`Không lưu được tài liệu mã lỗi: ${error.code?firebaseFirestoreError(error):error.message}`);
+    } finally {
+      if(button.isConnected){button.disabled=false;button.textContent=label;}
+    }
+  };
+}
+function showUploadModal() {
+  let parseSequence=0;
+  showModal("Tải đề Toán từ Word hoặc PDF",
+    `<p class="subhead" style="margin:0 0 14px">Hệ thống giữ ảnh, hình vẽ và công thức Word; PDF được tách theo nội dung văn bản và lưu ảnh chụp từng câu để đối chiếu.</p>
+    <label class="upload-zone" for="doc-file" tabindex="0">${icon("upload")}<strong>Chọn hoặc kéo thả file vào đây</strong><span>Định dạng hỗ trợ .docx, .pdf hoặc .txt · Tối đa 15 MB</span><input id="doc-file" type="file" accept=".docx,.pdf,.txt"/></label>
     <div class="field" style="margin-top:13px"><label for="doc-title">Tên bộ đề / tài liệu</label><input id="doc-title" placeholder="Ví dụ: Hàm số — Chuyên đề 1"/></div>
     <div class="field" style="margin-top:10px"><label for="doc-topic">Chủ đề / phần thi</label><select id="doc-topic"><option>Trắc nghiệm</option><option>Đúng / Sai</option><option>Trả lời ngắn</option><option>Toán tổng hợp</option><option>Mã lỗi thường gặp</option></select></div>
-    ${errorsOnly?"":'<label class="ai-opt-in"><input id="ai-boundaries" type="checkbox" checked/> Dùng Gemini AI để bóc tách câu và công thức. Gửi văn bản trích xuất; PDF scan sẽ gửi ảnh trang. Ảnh trong đề vẫn được giữ nguyên.</label>'}
+    <label class="ai-opt-in"><input id="ai-boundaries" type="checkbox" checked/> Dùng Gemini AI để bóc tách câu và công thức. Gửi văn bản trích xuất; PDF scan sẽ gửi ảnh trang. Ảnh trong đề vẫn được giữ nguyên.</label>
     <div id="doc-preview"></div><p class="notice">Tệp được xử lý trong trình duyệt. Word hỗ trợ công thức Equation/MathType và LaTeX; PDF scan không có lớp văn bản cần OCR trước khi tải lên.</p>`,
     `<button class="btn secondary" data-action="close-modal">Hủy</button><button class="btn" id="save-upload" disabled>Lưu vào kho</button>`);
   const input=document.querySelector("#doc-file");
@@ -1060,40 +1329,38 @@ function showUploadModal(kind) {
     pendingUpload=null;
     saveButton.disabled=true;
     try {
-      const analyzeQuestions=!errorsOnly&&Boolean(uploadModal.querySelector("#ai-boundaries")?.checked);
+      const analyzeQuestions=Boolean(uploadModal.querySelector("#ai-boundaries")?.checked);
       preview.innerHTML=`<p class="notice">${analyzeQuestions?"Đang trích xuất nội dung và gửi văn bản tới Gemini để bóc tách câu hỏi…":"Đang trích xuất nội dung và nhận diện câu hỏi trong trình duyệt…"}</p>`;
       const parsed=await parseDocument(file,{analyzeQuestions});
       if(!parsed.questions.length)throw new Error("Không nhận diện được câu hỏi. Kiểm tra tệp hoặc thử tải bản rõ hơn.");
       if(!uploadModal.isConnected||sequence!==parseSequence)return;
       pendingUpload={kind,file,parsed,title:title.value};
-      if(!errorsOnly) {
-        const modalPanel=uploadModal.querySelector(".modal");
-        modalPanel?.classList.add("modal-review");
-        const previewNode=modalPanel.querySelector("#doc-preview");
-        let workspace=modalPanel.querySelector(".review-workspace");
-        if(!workspace) {
-          workspace=document.createElement("div");
-          workspace.className="review-workspace";
-          const sidebar=document.createElement("aside"),main=document.createElement("section");
-          sidebar.className="review-sidebar";main.className="review-main";
-          const description=modalPanel.querySelector(":scope > .subhead");
-          const uploadZone=modalPanel.querySelector(".upload-zone");
-          const titleField=modalPanel.querySelector("#doc-title")?.closest(".field");
-          const topicField=modalPanel.querySelector("#doc-topic")?.closest(".field");
-          const aiOption=modalPanel.querySelector(".ai-opt-in");
-          const help=modalPanel.querySelector(":scope > .notice");
-          modalPanel.insertBefore(workspace,previewNode);
-          sidebar.append(description,uploadZone,titleField,topicField,aiOption,help);
-          main.append(previewNode);
-          workspace.append(sidebar,main);
-        }
-        const zoneLabel=modalPanel.querySelector(".upload-zone");
-        if(zoneLabel){
-          zoneLabel.querySelector("strong").textContent="Chọn tệp đề khác";
-          zoneLabel.querySelector("span").textContent=file.name;
-        }
-        modalPanel.querySelector(".modal-head h2").textContent="Rà soát và chỉnh sửa đề";
+      const modalPanel=uploadModal.querySelector(".modal");
+      modalPanel?.classList.add("modal-review");
+      const previewNode=modalPanel.querySelector("#doc-preview");
+      let workspace=modalPanel.querySelector(".review-workspace");
+      if(!workspace) {
+        workspace=document.createElement("div");
+        workspace.className="review-workspace";
+        const sidebar=document.createElement("aside"),main=document.createElement("section");
+        sidebar.className="review-sidebar";main.className="review-main";
+        const description=modalPanel.querySelector(":scope > .subhead");
+        const uploadZone=modalPanel.querySelector(".upload-zone");
+        const titleField=modalPanel.querySelector("#doc-title")?.closest(".field");
+        const topicField=modalPanel.querySelector("#doc-topic")?.closest(".field");
+        const aiOption=modalPanel.querySelector(".ai-opt-in");
+        const help=modalPanel.querySelector(":scope > .notice");
+        modalPanel.insertBefore(workspace,previewNode);
+        sidebar.append(description,uploadZone,titleField,topicField,aiOption,help);
+        main.append(previewNode);
+        workspace.append(sidebar,main);
       }
+      const zoneLabel=modalPanel.querySelector(".upload-zone");
+      if(zoneLabel){
+        zoneLabel.querySelector("strong").textContent="Chọn tệp đề khác";
+        zoneLabel.querySelector("span").textContent=file.name;
+      }
+      modalPanel.querySelector(".modal-head h2").textContent="Rà soát và chỉnh sửa đề";
       preview.innerHTML=importReviewMarkup(parsed);
       bindImportReview();
       void typesetMath(preview);
@@ -1112,7 +1379,7 @@ function showUploadModal(kind) {
     const label=button.textContent;
     button.disabled=true;
     button.textContent="Đang lưu câu hỏi…";
-    try { await saveUploadedDoc(errorsOnly); }
+    try { await saveUploadedDoc(false); }
     catch(error) {
       console.error("Could not save uploaded document.",error);
       const details=error.code==="app/teacher-role-required"?error.message:firebaseFirestoreError(error);
@@ -1273,7 +1540,8 @@ async function parseDocument(file,{analyzeQuestions=true}={}) {
   if(extension==="pdf") {
     const pdf=await parsePdfDocument(file,{analyzeQuestions});
     if(pdf.aiQuestions)return buildAiPdfResult(pdf.aiQuestions);
-    return parseQuestionHtml(pdf.html,pdf.pages,{analyzeQuestions});
+    try { return await parseQuestionHtml(pdf.html,pdf.pages,{analyzeQuestions}); }
+    finally { await pdf.document?.destroy().catch(()=>{}); }
   }
   let html="",mathMarkup=new Map();
   if(extension==="txt") {
@@ -1396,7 +1664,11 @@ async function parsePdfDocument(file,{analyzeQuestions=false}={}) {
     for(const line of lines)paragraphs.push(`<p data-source-page="${pageNumber}" data-source-y="${line.y}" data-source-height="${line.height}">${safe(line.text)}</p>`);
   }
   if(!extractedCharacters) {
-    if(!analyzeQuestions)throw new Error("PDF này không có lớp văn bản. Bật Dùng Gemini AI để OCR PDF scan.");
+    if(!analyzeQuestions) {
+      pages.forEach(source=>source.page.cleanup());
+      await pdf.destroy().catch(()=>{});
+      throw new Error("PDF scan không có lớp văn bản để trích xuất. Hãy OCR trước khi nạp.");
+    }
     if(pdf.numPages>20)throw new Error("PDF scan vượt quá 20 trang AI mỗi lần. Hãy chia nhỏ tệp để tránh yêu cầu quá lớn.");
     const aiQuestions=[];
     for(let pageNumber=1;pageNumber<=pdf.numPages;pageNumber++) {
@@ -1410,9 +1682,10 @@ async function parsePdfDocument(file,{analyzeQuestions=false}={}) {
       aiQuestions.push(...analysis.questions.map(question=>({...question,pageImageData:pageImages.review,sourcePageNumber:pageNumber})));
     }
     pages.forEach(source=>source.page.cleanup());
+    await pdf.destroy().catch(()=>{});
     return {aiQuestions};
   }
-  return {html:paragraphs.join(""),pages};
+  return {html:paragraphs.join(""),pages,document:pdf};
 }
 async function renderPdfPageForAi(source) {
   const canvas=document.createElement("canvas");
@@ -1939,8 +2212,17 @@ async function saveUploadedDoc(errorsOnly) {
   if(!pendingUpload)return;
   const name=document.querySelector("#doc-title").value.trim()||pendingUpload.file.name;
   if(errorsOnly) {
-    data.errorDocs=data.errorDocs||[];
-    data.errorDocs.push({id:`e-${Date.now()}`,name,summary:summarizeErrors(pendingUpload.parsed.text),text:pendingUpload.parsed.text.slice(0,6000)});
+    if(!isTeacher()||session?.source!=="firebase")throw new Error("Hãy đăng nhập bằng tài khoản giáo viên Firebase để đồng bộ tài liệu giữa các thiết bị.");
+    const text=String(document.querySelector("#error-document-text")?.value||pendingUpload.parsed.text||"").trim();
+    if(!text){toast("Văn bản đang trống. Hãy nạp hoặc nhập nội dung trước khi lưu.");return;}
+    const record={id:`e-${crypto.randomUUID?.()||Date.now()}`,teacherId:session.id,name:name.slice(0,200),summary:summarizeErrors(text),text:text.slice(0,40000),createdAt:new Date().toISOString()};
+    await configureFirestore();
+    await firebaseRequest(firebaseSdk.setDoc(firebaseSdk.doc(firebaseDb,"errorDocs",record.id),record));
+    data.errorDocs=[record,...(data.errorDocs||[]).filter(item=>item.id!==record.id)];
+    saveData();
+    pendingUpload=null;document.querySelector(".modal-backdrop")?.remove();render();
+    toast("Đã lưu tài liệu mã lỗi lên Firebase; tài khoản giáo viên này sẽ thấy tài liệu trên các thiết bị.");
+    return;
   } else {
     const uncropped=pendingUpload.parsed.questions.find(q=>q.sourceImageOnly&&q.sourceImageRects?.some((rect,index)=>!q.sourceImageCrops?.[index]));
     if(uncropped) {
@@ -1968,8 +2250,9 @@ async function saveUploadedDoc(errorsOnly) {
     :errorsOnly?"Đã lưu tài liệu và tạo tóm tắt nội dung.":cloudSaved?"Đã lưu câu hỏi và hình ảnh đã nén trong Firestore; tệp gốc không được lưu trên đám mây.":"Đã thêm bộ đề vào kho câu hỏi.");
 }
 function summarizeErrors(text) {
-  const matches=errors.filter(e=>e[1].toLocaleLowerCase("vi").split(" ").some(w=>w.length>4&&text.toLocaleLowerCase("vi").includes(w)));
-  return matches.length?`Nhận diện nội dung liên quan: ${matches.map(e=>e[1]).join(", ")}.`:"Đã trích xuất nội dung. Chưa có AI kết nối; giáo viên vui lòng xem tài liệu để xác nhận và gắn nhóm lỗi phù hợp.";
+  const normalized=normalizeVietnamese(text);
+  const matches=errors.filter(([code,name])=>new RegExp(`(?:^|[^a-z])${code.toLowerCase()}(?:$|[^a-z])`).test(normalized)||normalized.includes(normalizeVietnamese(name)));
+  return matches.length?`Tài liệu có nhắc đến: ${matches.map(([code,name])=>`${code} · ${name}`).join("; ")}. Đây là gợi ý theo chữ xuất hiện, không tự thay đổi nội dung mã lỗi.`:"Đã trích xuất văn bản. Chưa thấy tên hoặc mã KT, TT, PP, DG, SU, QT, MH; hãy rà lại nội dung đã trích xuất.";
 }
 function showSetModal(set) {
   if(!set)return;

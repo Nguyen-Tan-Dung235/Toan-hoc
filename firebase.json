@@ -17,6 +17,7 @@
       ".firebaserc",
       "firestore.rules",
       "README.md",
+      "Toán/**",
       "functions/**",
       "**/.*",
       "**/node_modules/**"
