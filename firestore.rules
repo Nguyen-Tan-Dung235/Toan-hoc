@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function staff() {
+      return signedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ["teacher", "owner"];
+    }
+    function owner() {
+      return signedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "owner";
+    }
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || staff());
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.role == "student"
+        && request.resource.data.keys().hasOnly(["displayName", "email", "role", "createdAt"])
+        && request.resource.data.email == request.auth.token.email;
+      allow update: if (
+          request.auth != null
+          && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["displayName", "email"])
+          && request.resource.data.email == request.auth.token.email
+        ) || (
+          owner()
+          && resource.data.role == "student"
+          && request.resource.data.role == "teacher"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["role"])
+        );
+    }
+    match /assignments/{assignmentId} {
+      allow read: if signedIn() && (
+        (staff() && resource.data.teacherId == request.auth.uid)
+        || request.auth.uid in resource.data.studentIds
+      );
+      allow create: if staff()
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.studentIds is list
+        && request.resource.data.studentIds.size() > 0
+        && request.resource.data.keys().hasAll([
+          "id", "teacherId", "studentIds", "title", "questions", "students",
+          "due", "state", "sections", "exam", "createdAt"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "id", "teacherId", "studentIds", "title", "questions", "students",
+          "due", "state", "sections", "exam", "createdAt"
+        ]);
+      allow update: if staff()
+        && resource.data.teacherId == request.auth.uid
+        && request.resource.data.teacherId == resource.data.teacherId
+        && request.resource.data.studentIds is list
+        && request.resource.data.studentIds.size() > 0
+        && request.resource.data.keys().hasAll([
+          "id", "teacherId", "studentIds", "title", "questions", "students",
+          "due", "state", "sections", "exam", "createdAt"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "id", "teacherId", "studentIds", "title", "questions", "students",
+          "due", "state", "sections", "exam", "createdAt"
+        ]);
+      allow delete: if staff() && resource.data.teacherId == request.auth.uid;
+
+      match /questions/{questionId} {
+        function assignment() {
+          return get(/databases/$(database)/documents/assignments/$(assignmentId));
+        }
+        allow read: if signedIn() && exists(/databases/$(database)/documents/assignments/$(assignmentId)) && (
+          (staff() && assignment().data.teacherId == request.auth.uid)
+          || request.auth.uid in assignment().data.studentIds
+        );
+        allow create: if staff() && request.resource.data.teacherId == request.auth.uid;
+        allow update: if staff() && exists(/databases/$(database)/documents/assignments/$(assignmentId))
+          && assignment().data.teacherId == request.auth.uid
+          && request.resource.data.teacherId == request.auth.uid;
+        allow delete: if staff() && exists(/databases/$(database)/documents/assignments/$(assignmentId))
+          && assignment().data.teacherId == request.auth.uid;
+      }
+    }
+    match /questionSets/{setId} {
+      allow read: if signedIn() && (
+        staff() || (resource.data.status == "published" && resource.data.hiddenFromStudents == false)
+      );
+      allow create: if staff()
+        && request.resource.data.teacherId == request.auth.uid
+        && request.resource.data.status == "uploading"
+        && request.resource.data.keys().hasAll([
+          "id", "title", "filename", "type", "questionCount", "sections",
+          "teacherId", "status", "createdAt"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "id", "title", "filename", "type", "questionCount", "sections",
+          "teacherId", "status", "createdAt", "sourcePath", "sourceContentType", "hiddenFromStudents"
+        ]);
+      allow update: if staff() && (
+        (resource.data.teacherId == request.auth.uid
+          && resource.data.status == "uploading"
+          && request.resource.data.teacherId == resource.data.teacherId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status"])
+          && request.resource.data.status == "published")
+        || (resource.data.status == "published"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["hiddenFromStudents"])
+          && request.resource.data.hiddenFromStudents is bool)
+      );
+      allow delete: if staff();
+
+      match /questions/{questionId} {
+        function questionSet() {
+          return get(/databases/$(database)/documents/questionSets/$(setId));
+        }
+        allow read: if signedIn() && exists(/databases/$(database)/documents/questionSets/$(setId)) && (
+          staff() || (questionSet().data.status == "published" && questionSet().data.hiddenFromStudents == false)
+        );
+        allow create, update: if staff()
+          && exists(/databases/$(database)/documents/questionSets/$(setId))
+          && questionSet().data.teacherId == request.auth.uid;
+        allow delete: if staff()
+          && exists(/databases/$(database)/documents/questionSets/$(setId));
+      }
+    }
+    match /errorDocs/{errorDocId} {
+      allow read: if staff() && resource.data.teacherId == request.auth.uid;
+      allow create: if staff() && request.resource.data.teacherId == request.auth.uid;
+      allow update, delete: if staff() && resource.data.teacherId == request.auth.uid;
+    }
+  }
+}

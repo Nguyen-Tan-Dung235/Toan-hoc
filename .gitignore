@@ -1,0 +1,26 @@
+# Firebase local cache and generated logs
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+
+# Dependencies and generated output
+node_modules/
+functions/node_modules/
+dist/
+coverage/
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+service-account*.json
+*-firebase-adminsdk-*.json
+
+# OS/editor temporary files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
