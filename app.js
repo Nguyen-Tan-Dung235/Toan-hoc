@@ -755,12 +755,18 @@ function comparePage() {
 }
 function studentsPage() {
   const students=data.users.filter(user=>user.role==="student");
+  const teachers=data.users.filter(user=>user.role==="teacher");
   const pending=students.filter(user=>user.accountStatus==="pendingDeletion");
   const active=students.filter(user=>user.accountStatus!=="pendingDeletion");
   return `${welcome("Học sinh của bạn","Theo dõi học tập, cấp quyền giáo viên và quản lý yêu cầu xóa có thời gian khôi phục.",`<button class="btn" data-action="add-student">${icon("plus")} Hướng dẫn đăng ký</button>`)}
   <div class="card section-card"><div class="section-heading"><div><h2>Danh sách học sinh</h2><p>${active.length} học sinh đang hoạt động</p></div><div class="toolbar"><input placeholder="Tìm học sinh..." id="student-filter"/></div></div>${studentManagementTable(active)}</div>
   <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Đang chờ xóa</h2><p>Tài khoản được giữ 24 giờ; giáo viên có thể khôi phục trong thời gian này.</p></div><span class="tag amber">${pending.length} tài khoản</span></div>${studentManagementTable(pending,true)}</div>
+  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Danh sách giáo viên</h2><p>${teachers.length} giáo viên trên hệ thống</p></div></div>${teacherDirectoryTable(teachers)}</div>
   ${session?.role==="owner"?`<div class="notice">Quản trị viên: bạn có thể cấp hoặc thu hồi quyền giáo viên cho học sinh. Cấp quyền chỉ khả dụng cho tài khoản đã đăng ký Firebase.</div>`:""}`;
+}
+function teacherDirectoryTable(users) {
+  if(!users.length)return `<div class="empty">Chưa có tài khoản giáo viên. Chủ sở hữu có thể cấp quyền giáo viên cho học sinh đã đăng ký.</div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>GIÁO VIÊN</th><th>VAI TRÒ</th></tr></thead><tbody>${users.map(user=>`<tr><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td><span class="tag">Giáo viên</span></td></tr>`).join("")}</tbody></table></div>`;
 }
 function studentManagementTable(users,pending=false) {
   if(!users.length)return `<div class="empty">${pending?"Không có tài khoản đang chờ xóa.":"Chưa có tài khoản học sinh trong Firebase."}</div>`;
@@ -964,7 +970,12 @@ async function runStudentFunction(name,payload,successMessage) {
     toast(successMessage);
   } catch(error) {
     console.error(`Firebase action ${name} failed.`,error);
-    toast(error.message||firebaseError(error));
+    const message=error.code==="functions/not-found"
+      ?"Chưa có Cloud Function quản lý tài khoản trên Firebase; học sinh chưa bị đưa vào danh sách chờ xóa."
+      :error.code==="functions/failed-precondition"
+        ?"Firebase chưa đáp ứng điều kiện để quản lý tài khoản; dữ liệu chưa thay đổi."
+        :error.message||firebaseError(error);
+    toast(message);
   }
 }
 async function loadFirebaseStudents() {
@@ -1035,10 +1046,30 @@ function showUploadModal(kind) {
       if(!errorsOnly) {
         const modalPanel=uploadModal.querySelector(".modal");
         modalPanel?.classList.add("modal-review");
-        modalPanel?.querySelector(":scope > .subhead")?.setAttribute("hidden","");
-        modalPanel?.querySelector(".upload-zone")?.setAttribute("hidden","");
-        modalPanel?.querySelector(".ai-opt-in")?.setAttribute("hidden","");
-        modalPanel?.querySelector(":scope > .notice")?.setAttribute("hidden","");
+        const previewNode=modalPanel.querySelector("#doc-preview");
+        let workspace=modalPanel.querySelector(".review-workspace");
+        if(!workspace) {
+          workspace=document.createElement("div");
+          workspace.className="review-workspace";
+          const sidebar=document.createElement("aside"),main=document.createElement("section");
+          sidebar.className="review-sidebar";main.className="review-main";
+          const description=modalPanel.querySelector(":scope > .subhead");
+          const uploadZone=modalPanel.querySelector(".upload-zone");
+          const titleField=modalPanel.querySelector("#doc-title")?.closest(".field");
+          const topicField=modalPanel.querySelector("#doc-topic")?.closest(".field");
+          const aiOption=modalPanel.querySelector(".ai-opt-in");
+          const help=modalPanel.querySelector(":scope > .notice");
+          modalPanel.insertBefore(workspace,previewNode);
+          sidebar.append(description,uploadZone,titleField,topicField,aiOption,help);
+          main.append(previewNode);
+          workspace.append(sidebar,main);
+        }
+        const zoneLabel=modalPanel.querySelector(".upload-zone");
+        if(zoneLabel){
+          zoneLabel.querySelector("strong").textContent="Chọn tệp đề khác";
+          zoneLabel.querySelector("span").textContent=file.name;
+        }
+        modalPanel.querySelector(".modal-head h2").textContent="Rà soát và chỉnh sửa đề";
       }
       preview.innerHTML=importReviewMarkup(parsed);
       bindImportReview();
