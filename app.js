@@ -63,6 +63,8 @@ let questionSetUnsubscribe = null;
 let questionSetSyncGeneration = 0;
 let attemptUnsubscribe = null;
 let attemptSyncGeneration = 0;
+let profileUnsubscribe = null;
+let profileSyncGeneration = 0;
 let registeringFirebaseAccount = false;
 let loginRole = "student";
 let currentQuestionIndex = 0;
@@ -99,6 +101,11 @@ function loadSession() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch { return null; }
 }
 function setSession(user) {
+  if(profileUnsubscribe&&(!user||session?.id!==user.id||session?.source!==user.source)) {
+    profileUnsubscribe();
+    profileUnsubscribe=null;
+    profileSyncGeneration++;
+  }
   if(attemptUnsubscribe&&(!user||session?.id!==user.id||session?.source!==user.source)) {
     attemptUnsubscribe();
     attemptUnsubscribe=null;
@@ -121,6 +128,33 @@ function setSession(user) {
     void loadFirebaseAssignments();
     void loadFirebaseQuestionSets();
     void loadFirebaseAttempts();
+    void watchFirebaseAccount(user.id);
+  }
+}
+async function watchFirebaseAccount(userId) {
+  const generation=++profileSyncGeneration;
+  profileUnsubscribe?.();
+  profileUnsubscribe=null;
+  try {
+    await configureFirestore();
+    if(generation!==profileSyncGeneration||session?.id!==userId)return;
+    profileUnsubscribe=firebaseSdk.onSnapshot(firebaseSdk.doc(firebaseDb,"users",userId),async snapshot=>{
+      if(generation!==profileSyncGeneration||session?.id!==userId)return;
+      const status=snapshot.exists()?snapshot.data().accountStatus:"missing";
+      if(!["disabled","pendingDeletion","deleting","missing"].includes(status))return;
+      const messages={
+        disabled:"Tài khoản đã bị giáo viên khóa. Hãy liên hệ giáo viên nếu bạn cần mở lại.",
+        pendingDeletion:"Tài khoản này đang bị hạn chế. Hãy liên hệ giáo viên.",
+        deleting:"Tài khoản này đang bị vô hiệu hóa. Hãy liên hệ giáo viên.",
+        missing:"Hồ sơ tài khoản không còn hoạt động. Hãy liên hệ giáo viên."
+      };
+      if(firebaseAuth?.currentUser?.uid===userId)await firebaseSdk.signOut(firebaseAuth).catch(error=>console.error("Could not sign out a disabled Firebase account.",error));
+      sessionNotice="";
+      setSession(null);
+      setLoginFeedback(messages[status],"error");
+    },error=>console.error("Could not monitor Firebase account status.",error));
+  } catch(error) {
+    console.error("Could not start Firebase account status listener.",error);
   }
 }
 async function configureFirebaseAuth() {
@@ -178,8 +212,8 @@ async function firebaseProfile(user,{createStudentProfile=false}={}) {
     try { await firebaseRequest(firebaseSdk.updateDoc(profileRef,{email:user.email})); }
     catch(error) { throw firebaseProfileError(error); }
   }
-  if(info.accountStatus==="pendingDeletion")throw new Error("Tài khoản này đang chờ xóa. Hãy nhờ giáo viên khôi phục trước thời hạn 24 giờ.");
-  if(info.accountStatus==="deleting")throw new Error("Đã hết hạn khôi phục; hệ thống đang tiến hành xóa tài khoản này.");
+  if(info.accountStatus==="disabled")throw new Error("Tài khoản này đã bị giáo viên khóa. Hãy liên hệ giáo viên nếu bạn cần mở lại.");
+  if(info.accountStatus==="pendingDeletion"||info.accountStatus==="deleting")throw new Error("Tài khoản này đã bị hạn chế truy cập. Hãy liên hệ giáo viên nếu bạn cần mở lại.");
   if(info.role!=="student"&&info.role!=="teacher"&&info.role!=="owner")throw new Error("Hồ sơ Firebase có vai trò không hợp lệ.");
   return {id:user.uid,email:user.email,name:info.displayName||user.displayName||user.email?.split("@")[0],role:info.role,source:"firebase"};
 }
@@ -756,11 +790,11 @@ function comparePage() {
 function studentsPage() {
   const students=data.users.filter(user=>user.role==="student");
   const teachers=data.users.filter(user=>user.role==="teacher");
-  const pending=students.filter(user=>user.accountStatus==="pendingDeletion");
-  const active=students.filter(user=>user.accountStatus!=="pendingDeletion");
-  return `${welcome("Học sinh của bạn","Theo dõi học tập, cấp quyền giáo viên và quản lý yêu cầu xóa có thời gian khôi phục.",`<button class="btn" data-action="add-student">${icon("plus")} Hướng dẫn đăng ký</button>`)}
-  <div class="card section-card"><div class="section-heading"><div><h2>Danh sách học sinh</h2><p>${active.length} học sinh đang hoạt động</p></div><div class="toolbar"><input placeholder="Tìm học sinh..." id="student-filter"/></div></div>${studentManagementTable(active)}</div>
-  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Đang chờ xóa</h2><p>Tài khoản được giữ 24 giờ; giáo viên có thể khôi phục trong thời gian này.</p></div><span class="tag amber">${pending.length} tài khoản</span></div>${studentManagementTable(pending,true)}</div>
+  const disabled=students.filter(user=>["disabled","pendingDeletion","deleting"].includes(user.accountStatus));
+  const active=students.filter(user=>!["disabled","pendingDeletion","deleting"].includes(user.accountStatus));
+  return `${welcome("Học sinh của bạn","Quản lý quyền truy cập học sinh. Khóa tài khoản sẽ ngăn đăng nhập và kết thúc phiên đang mở.",`<button class="btn" data-action="add-student">${icon("plus")} Hướng dẫn đăng ký</button>`)}
+  <div class="card section-card"><div class="section-heading"><div><h2>Danh sách học sinh</h2><p>${active.length} tài khoản có quyền truy cập</p></div><div class="toolbar"><input placeholder="Tìm học sinh..." id="student-filter"/></div></div>${studentManagementTable(active)}</div>
+  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Tài khoản bị khóa</h2><p>Không thể đăng nhập hoặc tiếp tục sử dụng web. Có thể mở lại bất cứ lúc nào.</p></div><span class="tag amber">${disabled.length} tài khoản</span></div>${studentManagementTable(disabled,true)}</div>
   <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Danh sách giáo viên</h2><p>${teachers.length} giáo viên trên hệ thống</p></div></div>${teacherDirectoryTable(teachers)}</div>
   ${session?.role==="owner"?`<div class="notice">Quản trị viên: bạn có thể cấp hoặc thu hồi quyền giáo viên cho học sinh. Cấp quyền chỉ khả dụng cho tài khoản đã đăng ký Firebase.</div>`:""}`;
 }
@@ -768,12 +802,10 @@ function teacherDirectoryTable(users) {
   if(!users.length)return `<div class="empty">Chưa có tài khoản giáo viên. Chủ sở hữu có thể cấp quyền giáo viên cho học sinh đã đăng ký.</div>`;
   return `<div class="table-wrap"><table><thead><tr><th>GIÁO VIÊN</th><th>VAI TRÒ</th></tr></thead><tbody>${users.map(user=>`<tr><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td><span class="tag">Giáo viên</span></td></tr>`).join("")}</tbody></table></div>`;
 }
-function studentManagementTable(users,pending=false) {
-  if(!users.length)return `<div class="empty">${pending?"Không có tài khoản đang chờ xóa.":"Chưa có tài khoản học sinh trong Firebase."}</div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>TRẠNG THÁI</th><th>${pending?"XÓA SAU":"QUẢN LÝ"}</th></tr></thead><tbody>${users.map(user=>{
-    const deleteAt=Date.parse(user.deleteAfter||"");
-    const deleteLabel=Number.isFinite(deleteAt)?new Date(deleteAt).toLocaleString("vi-VN"):"Đang chờ";
-    return `<tr><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td>${pending?'<span class="tag amber">Đang chờ xóa</span>':`<span class="tag">${user.role==="teacher"?"Giáo viên":"Học sinh"}</span>`}</td><td>${pending?`<div class="student-actions"><span class="subhead">${safe(deleteLabel)}</span><button class="btn secondary" data-action="restore-student" data-id="${safe(user.id)}">Giữ tài khoản</button></div>`:`<div class="student-actions">${session?.role==="owner"&&user.role==="student"?`<button class="text-button" data-action="grant-teacher" data-id="${safe(user.id)}">Cấp giáo viên</button>`:""}<button class="text-button danger-text" data-action="schedule-delete-student" data-id="${safe(user.id)}">Xóa sau 24 giờ</button></div>`}</td></tr>`;
+function studentManagementTable(users,disabled=false) {
+  if(!users.length)return `<div class="empty">${disabled?"Không có tài khoản học sinh bị khóa.":"Chưa có tài khoản học sinh trong Firebase."}</div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>TRẠNG THÁI</th><th>QUẢN LÝ</th></tr></thead><tbody>${users.map(user=>{
+    return `<tr><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td>${disabled?'<span class="tag amber">Đã khóa</span>':`<span class="tag">Đang hoạt động</span>`}</td><td><div class="student-actions">${!disabled&&session?.role==="owner"?`<button class="text-button" data-action="grant-teacher" data-id="${safe(user.id)}">Cấp giáo viên</button>`:""}<button class="text-button ${disabled?"":"danger-text"}" data-action="${disabled?"enable-student":"disable-student"}" data-id="${safe(user.id)}">${disabled?"Mở khóa":"Khóa truy cập"}</button></div></td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
 function studentsTable(users,clickable) {
@@ -841,13 +873,21 @@ async function handleAction(button) {
     showUploadModal("errors");return;
   }
   if(action==="add-student"){showStudentModal();return;}
-  if(action==="schedule-delete-student"){
-    if(!confirm("Đưa tài khoản này vào danh sách chờ xóa? Tài khoản chỉ bị xóa vĩnh viễn sau 24 giờ."))return;
-    await runStudentFunction("scheduleStudentDeletion",{studentId:id},"Đã đưa tài khoản vào danh sách chờ xóa 24 giờ.");
-    return;
-  }
-  if(action==="restore-student"){
-    await runStudentFunction("cancelStudentDeletion",{studentId:id},"Đã khôi phục tài khoản học sinh.");
+  if(action==="disable-student"||action==="enable-student"){
+    const student=data.users.find(user=>user.id===id&&user.role==="student");
+    if(!student)return;
+    const disabled=action==="disable-student";
+    if(disabled&&!confirm(`Khóa tài khoản ${student.name} (${student.email}) ngay bây giờ? Học sinh sẽ bị đăng xuất và không thể vào web. Dữ liệu vẫn được giữ và có thể mở khóa lại.`))return;
+    if(session?.source!=="firebase"||!isTeacher()){toast("Cần đăng nhập giáo viên Firebase để thay đổi quyền truy cập.");return;}
+    try {
+      await configureFirestore();
+      await firebaseRequest(firebaseSdk.updateDoc(firebaseSdk.doc(firebaseDb,"users",id),{accountStatus:disabled?"disabled":"active"}));
+      if(!await loadFirebaseStudents())return;
+      toast(disabled?"Đã khóa quyền truy cập. Học sinh sẽ bị đăng xuất khi trạng thái đồng bộ.":"Đã mở khóa tài khoản học sinh.");
+    } catch(error) {
+      console.error("Could not update student access status.",error);
+      toast(`Không thể ${disabled?"khóa":"mở khóa"} tài khoản: ${firebaseFirestoreError(error)}`);
+    }
     return;
   }
   if(action==="grant-teacher"){
@@ -959,23 +999,6 @@ async function handleAction(button) {
   if(action==="finish-exam"){
     if(Object.keys(currentPractice?.answers||{}).length&&!window.confirm("Thoát bài sẽ xóa câu trả lời chưa nộp. Bạn có muốn quay lại không?"))return;
     currentPractice=null;currentPage=practiceReturnPage;render();return;
-  }
-}
-async function runStudentFunction(name,payload,successMessage) {
-  try {
-    await configureFirebaseFunctions();
-    const callable=firebaseSdk.httpsCallable(firebaseFunctions,name);
-    await callable(payload);
-    if(!await loadFirebaseStudents())return;
-    toast(successMessage);
-  } catch(error) {
-    console.error(`Firebase action ${name} failed.`,error);
-    const message=error.code==="functions/not-found"
-      ?"Chưa có Cloud Function quản lý tài khoản trên Firebase; học sinh chưa bị đưa vào danh sách chờ xóa."
-      :error.code==="functions/failed-precondition"
-        ?"Firebase chưa đáp ứng điều kiện để quản lý tài khoản; dữ liệu chưa thay đổi."
-        :error.message||firebaseError(error);
-    toast(message);
   }
 }
 async function loadFirebaseStudents() {
@@ -1987,7 +2010,7 @@ function showStudentModal() {
 }
 function showExamModal(personal,studentId=null,selectedSetIds=[],selectedErrorIds=[]) {
   const sets=data.sets||[];
-  const activeStudents=data.users.filter(user=>user.role==="student"&&user.accountStatus!=="pendingDeletion");
+  const activeStudents=data.users.filter(user=>user.role==="student"&&!(["disabled","pendingDeletion","deleting"].includes(user.accountStatus)));
   const initialErrors=errors.map((e,i)=>({code:e[0],count:userStats(session).counts[i]})).sort((a,b)=>b.count-a.count).slice(0,3).map(e=>e.code);
   const checkedErrors=selectedErrorIds.length?selectedErrorIds:initialErrors;
   if(!sets.length){toast("Bạn cần tải ít nhất một file .docx vào Kho câu hỏi trước.");if(isTeacher()){currentPage="library";render();}return;}
