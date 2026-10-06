@@ -1172,6 +1172,14 @@ async function handleAction(button) {
   }
   if(action==="start-assignment"){startAssignment(data.assignments.find(a=>a.id===id));return;}
   if(action==="view-set"){showSetModal(data.sets.find(s=>s.id===id));return;}
+  if(action==="delete-question"){
+    if(button.disabled)return;
+    button.disabled=true;
+    button.textContent="Đang xóa…";
+    try { await deleteQuestionFromSet(button.dataset.setId,id); }
+    finally { if(button.isConnected){button.disabled=false;button.textContent="Xóa câu";} }
+    return;
+  }
   if(action==="choose-set"){document.querySelector(".modal-backdrop")?.remove();currentPage="personal";render();const check=[...document.querySelectorAll(".set-check")].find(input=>input.value===id);if(check)check.checked=true;return;}
   if(action==="assignment-detail"){toast("Bài tập đang mở cho học sinh. Kết quả sẽ cập nhật sau khi các em hoàn thành.");return;}
   if(action==="next-question"){nextQuestion();return;}
@@ -2268,9 +2276,10 @@ function showSetModal(set) {
     void typesetMath(document.querySelector(".modal"));
     return;
   }
-  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<div class="review-workspace set-review-workspace"><aside class="review-sidebar">${summary}<p class="notice">Phần thi và mã lỗi là gợi ý ban đầu. Thay đổi được lưu tự động.</p></aside><section class="review-main"><div id="doc-preview"><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung và phương án được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${safe(q.id)}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div></div></section></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<div class="review-workspace set-review-workspace"><aside class="review-sidebar">${summary}<p class="notice">Phần thi và mã lỗi là gợi ý ban đầu. Thay đổi được lưu tự động.</p></aside><section class="review-main"><div id="doc-preview"><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung và phương án được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><div class="review-question-actions"><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small><button type="button" class="text-button danger-text" data-action="delete-question" data-id="${safe(q.id)}" data-set-id="${safe(set.id)}">Xóa câu</button></div></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${safe(q.id)}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div></div></section></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
   document.querySelector(".modal")?.classList.add("modal-review");
   void typesetMath(document.querySelector(".modal"));
+  document.querySelectorAll('.modal-backdrop [data-action="delete-question"]').forEach(button=>button.onclick=()=>{void handleAction(button);});
   document.querySelectorAll(".question-error").forEach(el=>el.onchange=()=>updateQuestion(set.id,el.dataset.questionId,{errorId:el.value||null}));
   document.querySelectorAll(".question-key").forEach(el=>el.onchange=()=>{
     const question=set.questions.find(item=>item.id===el.dataset.questionId);
@@ -2280,6 +2289,45 @@ function showSetModal(set) {
     const question=set.questions.find(item=>item.id===el.dataset.questionId);
     if(question)updateQuestion(set.id,el.dataset.questionId,{section:el.value,answerKey:normalizeQuestionKey(question.answerKey,el.value)});
   });
+}
+async function deleteQuestionFromSet(setId,questionId) {
+  if(!isTeacher()){toast("Chỉ giáo viên mới được xóa câu hỏi khỏi bộ đề.");return false;}
+  const set=data.sets.find(item=>item.id===setId);
+  const originalQuestions=set?.questions||[];
+  const question=originalQuestions.find(item=>item.id===questionId);
+  if(!set||!question)return false;
+  if(originalQuestions.length<=1){toast("Bộ đề cần còn ít nhất một câu. Nếu muốn bỏ toàn bộ, hãy xóa cả bộ đề trong Kho câu hỏi.");return false;}
+  if(!window.confirm(`Xóa câu ${question.questionNumber||questionId} khỏi bộ đề “${set.title}”? Học sinh sẽ không còn thấy câu này trong kho. Các đề đã giao vẫn giữ bản sao câu hỏi.`))return false;
+  const remaining=originalQuestions.filter(item=>item.id!==questionId);
+  const sections=[...new Set(remaining.map(item=>item.section).filter(section=>["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].includes(section)))];
+  if(session?.source==="firebase") {
+    try {
+      await configureFirestore();
+      const batch=firebaseSdk.writeBatch(firebaseDb);
+      batch.delete(firebaseSdk.doc(firebaseDb,"questionSets",setId,"questions",questionId));
+      batch.update(firebaseSdk.doc(firebaseDb,"questionSets",setId),{questionCount:remaining.length,sections});
+      await firebaseRequest(batch.commit());
+    } catch(error) {
+      console.error("Could not delete a question from the shared question set.",error);
+      toast(`Không thể xóa câu hỏi khỏi Firebase: ${firebaseFirestoreError(error)}`);
+      return false;
+    }
+  }
+  const currentSet=data.sets.find(item=>item.id===setId);
+  if(currentSet) {
+    currentSet.questions=(currentSet.questions||[]).filter(item=>item.id!==questionId);
+    currentSet.questionCount=currentSet.questions.length;
+    currentSet.sections=[...new Set(currentSet.questions.map(item=>item.section).filter(section=>["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].includes(section)))];
+  }
+  data.questions=(data.sets||[]).flatMap(item=>(item.questions||[]).map(itemQuestion=>({...itemQuestion,setId:item.id})));
+  const stored=saveData();
+  if(!stored&&session?.source!=="firebase")return false;
+  document.querySelector(".modal-backdrop")?.remove();
+  render();
+  const updatedSet=data.sets.find(item=>item.id===setId);
+  if(updatedSet)showSetModal(updatedSet);
+  toast("Đã xóa câu khỏi bộ đề và cập nhật số lượng câu hỏi.");
+  return true;
 }
 async function updateQuestion(setId,questionId,changes) {
   const set=data.sets.find(item=>item.id===setId);

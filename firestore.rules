@@ -184,6 +184,12 @@ service cloud.firestore {
         || (resource.data.status == "published"
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["hiddenFromStudents"])
           && request.resource.data.hiddenFromStudents is bool)
+        || (resource.data.status == "published"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["questionCount", "sections"])
+          && request.resource.data.questionCount is int
+          && request.resource.data.questionCount >= 0
+          && request.resource.data.sections is list
+          && request.resource.data.sections.size() <= 3)
       );
       allow delete: if staff();
 
