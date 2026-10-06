@@ -1052,7 +1052,7 @@ async function handleAction(button) {
   }
   if(action==="upload-errors"){
     if(!isTeacher()){toast("Chỉ giáo viên mới được tải tài liệu mã lỗi lên.");return;}
-    showUploadModal("errors");return;
+    showErrorUploadModal();return;
   }
   if(action==="add-student"){showStudentModal();return;}
   if(action==="disable-student"||action==="enable-student"){
@@ -1334,7 +1334,7 @@ function showUploadModal() {
       const parsed=await parseDocument(file,{analyzeQuestions});
       if(!parsed.questions.length)throw new Error("Không nhận diện được câu hỏi. Kiểm tra tệp hoặc thử tải bản rõ hơn.");
       if(!uploadModal.isConnected||sequence!==parseSequence)return;
-      pendingUpload={kind,file,parsed,title:title.value};
+      pendingUpload={kind:"questions",file,parsed,title:title.value};
       const modalPanel=uploadModal.querySelector(".modal");
       modalPanel?.classList.add("modal-review");
       const previewNode=modalPanel.querySelector("#doc-preview");
