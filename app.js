@@ -1142,7 +1142,7 @@ function renderQuestionImageReview(question,sourcePages={}) {
   return `<div class="question-source-review">${(question.sourceImageRects||[]).map((rect,index)=>{
     const crop=question.sourceImageCrops?.[index];
     const source=sourcePages[rect.page];
-    return `<section class="question-image-part"><div class="question-image-preview">${crop?`<img class="pdf-source-image" src="${safe(crop)}" alt="Ảnh câu hỏi đã cắt"/>`:'<div class="question-image-empty">Ảnh trang nguồn chưa được cắt thành câu hỏi.</div>'}</div><button type="button" class="btn secondary question-crop-open" data-question-id="${safe(question.id)}" data-part-index="${index}" ${source?"": "disabled"}>${crop?"Căn chỉnh khung ảnh câu hỏi":"Cắt ảnh câu hỏi"}</button><div class="question-crop-editor" data-question-id="${safe(question.id)}" data-part-index="${index}" data-source-page="${rect.page}" hidden><p class="subhead">Kéo để vẽ lại khung quanh trọn câu và mọi phương án. Kéo bên trong khung hiện có để dịch chuyển, hoặc bấm “Vẽ khung mới” rồi kéo vùng khác.</p><div class="question-crop-stage"><img class="question-crop-source" alt="Trang PDF gốc"/><div class="question-crop-selection" hidden></div></div><div><button type="button" class="btn question-crop-save">Dùng khung này</button><button type="button" class="text-button question-crop-redraw">Vẽ khung mới</button><button type="button" class="text-button question-crop-cancel">Hủy</button></div></div></section>`;
+    return `<section class="question-image-part"><div class="question-image-preview">${crop?`<img class="pdf-source-image" src="${safe(crop)}" alt="Ảnh câu hỏi đã cắt"/>`:'<div class="question-image-empty">Ảnh trang nguồn chưa được cắt thành câu hỏi.</div>'}</div><button type="button" class="btn secondary question-crop-open" data-question-id="${safe(question.id)}" data-part-index="${index}" ${source?"": "disabled"}>${crop?"Căn chỉnh khung ảnh câu hỏi":"Cắt ảnh câu hỏi"}</button><div class="question-crop-editor" data-question-id="${safe(question.id)}" data-part-index="${index}" data-source-page="${rect.page}" hidden><p class="subhead">Giữ chuột trái và kéo để vẽ khung mới quanh trọn câu hỏi cùng các phương án. Có thể chọn “Dời khung” để dịch chuyển vùng đã khoanh.</p><div class="question-crop-stage"><img class="question-crop-source" alt="Trang PDF gốc"/><div class="question-crop-selection" hidden></div></div><div><button type="button" class="btn question-crop-save">Dùng khung này</button><button type="button" class="btn secondary question-crop-move">Dời khung</button><button type="button" class="text-button question-crop-cancel">Hủy</button></div></div></section>`;
   }).join("")}</div>`;
 }
 function renderImportChoices(question) {
@@ -1169,14 +1169,19 @@ function bindImportReview() {
     editor.querySelector(".question-crop-source").src=sourcePage;
     const hasCrop=Boolean(question.sourceImageCrops?.[partIndex]);
     editor.dataset.cropRect=hasCrop?JSON.stringify(rect):"null";
+    editor.dataset.mode="draw";
+    editor.querySelector(".question-crop-move").textContent="Dời khung";
+    editor.querySelector(".question-crop-stage").classList.remove("is-moving");
     if(hasCrop)drawQuestionCropSelection(selection,rect);else selection.hidden=true;
     editor.hidden=false;
     bindQuestionCropEditor(editor);
   });
   document.querySelectorAll(".question-crop-cancel").forEach(button=>button.onclick=()=>{button.closest(".question-crop-editor").hidden=true;});
-  document.querySelectorAll(".question-crop-redraw").forEach(button=>button.onclick=()=>{
-    const editor=button.closest(".question-crop-editor");editor.dataset.cropRect="null";
-    editor.querySelector(".question-crop-selection").hidden=true;
+  document.querySelectorAll(".question-crop-move").forEach(button=>button.onclick=()=>{
+    const editor=button.closest(".question-crop-editor");
+    editor.dataset.mode=editor.dataset.mode==="move"?"draw":"move";
+    button.textContent=editor.dataset.mode==="move"?"Vẽ khung mới":"Dời khung";
+    editor.querySelector(".question-crop-stage").classList.toggle("is-moving",editor.dataset.mode==="move");
   });
   document.querySelectorAll(".question-crop-save").forEach(button=>button.onclick=()=>{
     const editor=button.closest(".question-crop-editor"),question=getQuestion(editor.dataset.questionId);
@@ -1184,8 +1189,9 @@ function bindImportReview() {
     const image=editor.querySelector(".question-crop-source");
     if(!question||!rect||rect.width<.01||rect.height<.01||!image.naturalWidth){toast("Kéo để khoanh trọn câu hỏi và các phương án.");return;}
     const sx=Math.max(0,Math.floor(rect.x*image.naturalWidth)),sy=Math.max(0,Math.floor(rect.y*image.naturalHeight));
-    const sw=Math.min(image.naturalWidth-sx,Math.max(1,Math.ceil(rect.width*image.naturalWidth)));
-    const sh=Math.min(image.naturalHeight-sy,Math.max(1,Math.ceil(rect.height*image.naturalHeight)));
+    const ex=Math.min(image.naturalWidth,Math.ceil((rect.x+rect.width)*image.naturalWidth));
+    const ey=Math.min(image.naturalHeight,Math.ceil((rect.y+rect.height)*image.naturalHeight));
+    const sw=Math.max(1,ex-sx),sh=Math.max(1,ey-sy);
     const canvas=document.createElement("canvas");canvas.width=sw;canvas.height=sh;
     canvas.getContext("2d").drawImage(image,sx,sy,sw,sh,0,0,sw,sh);
     const crop=canvas.toDataURL("image/webp",.92);
@@ -1225,13 +1231,14 @@ function bindQuestionCropEditor(editor) {
   let start=null,origin=null,moveExisting=false;
   const point=event=>{
     const bounds=image.getBoundingClientRect();
-    return {x:Math.max(0,Math.min(1,(event.clientX-bounds.left)/bounds.width)),y:Math.max(0,Math.min(1,(event.clientY-bounds.top)/bounds.height))};
+    return {x:Math.max(0,Math.min(1,(event.clientX-bounds.left)/Math.max(1,bounds.width))),y:Math.max(0,Math.min(1,(event.clientY-bounds.top)/Math.max(1,bounds.height)))};
   };
   stage.onpointerdown=event=>{
     if(!image.complete||!image.naturalWidth)return;
     event.preventDefault();stage.setPointerCapture(event.pointerId);start=point(event);
     try { origin=JSON.parse(editor.dataset.cropRect||"null"); } catch { origin=null; }
-    moveExisting=Boolean(origin&&start.x>=origin.x&&start.x<=origin.x+origin.width&&start.y>=origin.y&&start.y<=origin.y+origin.height);
+    moveExisting=editor.dataset.mode==="move"&&Boolean(origin&&start.x>=origin.x&&start.x<=origin.x+origin.width&&start.y>=origin.y&&start.y<=origin.y+origin.height);
+    if(editor.dataset.mode==="move"&&!moveExisting){start=null;origin=null;stage.releasePointerCapture(event.pointerId);return;}
     if(!moveExisting)origin=null;
     if(!origin)drawQuestionCropSelection(selection,{x:start.x,y:start.y,width:0,height:0});
   };
@@ -1244,7 +1251,8 @@ function bindQuestionCropEditor(editor) {
     editor.dataset.cropRect=JSON.stringify(rect);
     drawQuestionCropSelection(selection,rect);
   };
-  stage.onpointerup=event=>{if(start){stage.releasePointerCapture(event.pointerId);start=null;}};
+  const finish=event=>{if(start){if(stage.hasPointerCapture(event.pointerId))stage.releasePointerCapture(event.pointerId);start=null;origin=null;moveExisting=false;}};
+  stage.onpointerup=finish;stage.onpointercancel=finish;
 }
 function normalizeQuestionKey(value,section) {
   const text=String(value||"").trim();
@@ -1966,14 +1974,20 @@ function summarizeErrors(text) {
 function showSetModal(set) {
   if(!set)return;
   const qs=set.questions||[];
+  const counts=Object.fromEntries(["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(section=>[section,qs.filter(q=>q.section===section).length]));
+  const summary=`<p class="subhead">${qs.length} câu · ${safe(set.filename||"Bộ đề đã lưu")} · ${qs.filter(q=>q.hasImages).length} câu có hình.</p><div class="review-summary">${Object.entries(counts).map(([section,count])=>`<span>${section}: <b>${count}</b></span>`).join("")}<span>Tổng số câu: <b>${qs.length}</b></span></div>`;
   if(!isTeacher()) {
     showModal(`Xem trước bộ đề: ${safe(set.title)}`,
-      `<p class="subhead">${set.questionCount} câu · ${safe(set.filename)} · ${qs.filter(q=>q.hasImages).length} câu có hình.</p><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}</strong><span>${q.sourceImageOnly?"Nội dung được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,145))}${q.content.length>145?"…":""}`}</span></div><details class="review-detail"><summary>Xem nội dung câu hỏi</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div></details></article>`).join("")}</div>`,
+      `<div class="review-workspace set-review-workspace"><aside class="review-sidebar">${summary}<p class="notice">Chọn câu hỏi để xem nội dung. Nội dung câu trả lời nằm trong ảnh sẽ được giữ nguyên như đề gốc.</p></aside><section class="review-main"><div id="doc-preview"><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}</strong><span>${q.sourceImageOnly?"Nội dung và phương án được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span></div><details class="review-detail"><summary>Xem nội dung câu hỏi</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div></details></article>`).join("")}</div></div></section></div>`,
       `<button class="btn secondary" data-action="close-modal">Đóng</button><button class="btn" data-action="choose-set" data-id="${safe(set.id)}">Chọn đề tự luyện</button>`);
+    document.querySelector(".modal")?.classList.add("modal-review");
+    document.querySelectorAll('.modal-backdrop [data-action="choose-set"]').forEach(button=>button.onclick=()=>handleAction(button));
+    void typesetMath(document.querySelector(".modal"));
     return;
   }
-  const counts=Object.fromEntries(["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(section=>[section,qs.filter(q=>q.section===section).length]));
-  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<p class="subhead">${set.questionCount} câu · ${safe(set.filename)} · ${qs.filter(q=>q.hasImages).length} câu có hình. Phần thi và mã lỗi đã được gợi ý tự động.</p><div class="review-summary">${Object.entries(counts).map(([section,count])=>`<span>${section}: <b>${count}</b></span>`).join("")}<span>Cần rà soát: <b>${qs.filter(q=>q.classificationConfidence==="review"||!q.errorId).length}</b></span></div><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,145))}${q.content.length>145?"…":""}`}</span><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${q.id}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${q.id}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${q.id}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div><p class="notice">AI tách câu và công thức khi được bật lúc tải tài liệu. Đáp án AI luôn để trống, không tự giải; phần thi và mã lỗi là gợi ý, hãy kiểm tra nội dung và đáp án trước khi lưu.</p>`,`<button class="btn" data-action="close-modal">Lưu rà soát</button>`);
+  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<div class="review-workspace set-review-workspace"><aside class="review-sidebar">${summary}<p class="notice">Phần thi và mã lỗi là gợi ý ban đầu. Thay đổi được lưu tự động.</p></aside><section class="review-main"><div id="doc-preview"><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung và phương án được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${safe(q.id)}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div></div></section></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+  document.querySelector(".modal")?.classList.add("modal-review");
+  void typesetMath(document.querySelector(".modal"));
   document.querySelectorAll(".question-error").forEach(el=>el.onchange=()=>updateQuestion(set.id,el.dataset.questionId,{errorId:el.value||null}));
   document.querySelectorAll(".question-key").forEach(el=>el.onchange=()=>{
     const question=set.questions.find(item=>item.id===el.dataset.questionId);
@@ -2117,8 +2131,8 @@ function questionForm(q) {
     :(q.choices||[]);
   if(q.type==="essay")return `<div class="field" style="margin-top:17px"><label>Bài làm của bạn</label><textarea class="answer essay-answer" rows="7" placeholder="Trình bày lời giải...">${safe(answer||"")}</textarea></div>`;
   if(q.section==="Trả lời ngắn")return `<div class="field" style="margin-top:17px"><label>Đáp án của bạn</label><input class="answer" placeholder="Nhập đáp án..." value="${safe(answer||"")}"/></div>`;
-  if(q.section==="Đúng / Sai"&&imageChoices.length)return `<div class="question-options statement-options">${imageChoices.map(choice=>`<label><b>${choice.label}.</b><span>${q.sourceImageOnly?"Mệnh đề nằm trong ảnh câu hỏi":choice.html}</span><select class="answer true-false-answer" data-label="${choice.label}" aria-label="Chọn đúng sai cho mệnh đề ${choice.label}"><option value="">Chọn</option><option value="Đ" ${answer?.[choice.label]==="Đ"?"selected":""}>Đúng</option><option value="S" ${answer?.[choice.label]==="S"?"selected":""}>Sai</option></select></label>`).join("")}</div>`;
-  if(q.section==="Trắc nghiệm"&&imageChoices.length)return `<div class="question-options">${imageChoices.map(choice=>`<label><input class="answer" type="radio" name="answer-${q.id}" value="${choice.label}" ${answer===choice.label?"checked":""}/><b>${choice.label}.</b><span>${q.sourceImageOnly?"Phương án nằm trong ảnh câu hỏi":choice.html}</span></label>`).join("")}</div>`;
+  if(q.section==="Đúng / Sai"&&imageChoices.length)return `<div class="question-options statement-options">${imageChoices.map(choice=>`<label><b>${choice.label}.</b>${q.sourceImageOnly?"":`<span>${choice.html}</span>`}<select class="answer true-false-answer" data-label="${choice.label}" aria-label="Chọn đúng sai cho mệnh đề ${choice.label}"><option value="">Chọn</option><option value="Đ" ${answer?.[choice.label]==="Đ"?"selected":""}>Đúng</option><option value="S" ${answer?.[choice.label]==="S"?"selected":""}>Sai</option></select></label>`).join("")}</div>`;
+  if(q.section==="Trắc nghiệm"&&imageChoices.length)return `<div class="question-options">${imageChoices.map(choice=>`<label><input class="answer" type="radio" name="answer-${q.id}" value="${choice.label}" ${answer===choice.label?"checked":""}/><b>${choice.label}.</b>${q.sourceImageOnly?"":`<span>${choice.html}</span>`}</label>`).join("")}</div>`;
   return `<div class="field" style="margin-top:17px"><label>Đáp án của bạn</label><input class="answer" placeholder="Nhập đáp án..." value="${safe(answer||"")}"/></div>`;
 }
 function nextQuestion() {
