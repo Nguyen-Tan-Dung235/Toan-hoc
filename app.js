@@ -321,11 +321,12 @@ async function loadFirebaseErrorCategories() {
     return false;
   }
 }
-async function updateErrorCategory(index,code,name,description) {
+async function updateErrorCategory(ordinal,code,name,description) {
   if(!isTeacher()||session?.source!=="firebase")throw new Error("Chỉ giáo viên đăng nhập Firebase mới có thể sửa nội dung dùng chung.");
-  if(!Number.isInteger(index)||index<0||index>=DEFAULT_ERRORS.length)throw new Error("Vị trí mã lỗi không hợp lệ.");
+  if(!Number.isInteger(ordinal)||ordinal<1||ordinal>DEFAULT_ERRORS.length)throw new Error("Vị trí mã lỗi không hợp lệ.");
+  const index=ordinal-1;
   const normalizedCode=String(code||"").trim().toLocaleUpperCase("vi");
-  if(!/^[A-ZĐÀ-Ỹ]{1,8}$/.test(normalizedCode))throw new Error("Mã lỗi chỉ gồm 1–8 chữ cái in hoa, không có dấu cách hoặc ký tự khác.");
+  if(!/^\p{Lu}{1,8}$/u.test(normalizedCode))throw new Error("Mã lỗi chỉ gồm 1–8 chữ cái in hoa, không có dấu cách hoặc ký tự khác.");
   const normalizedName=String(name||"").trim(),normalizedDescription=String(description||"").trim();
   if(!normalizedName||normalizedName.length>100)throw new Error("Tên mã lỗi cần có từ 1 đến 100 ký tự.");
   if(!normalizedDescription||normalizedDescription.length>1600)throw new Error("Mô tả cần có từ 1 đến 1.600 ký tự.");
@@ -849,7 +850,7 @@ function mobileNav() {
   return `<nav class="mobile-bottom">${entries.map(([key,ico,label])=>`<button data-page="${key}" class="${currentPage===key?"active":""}">${icon(ico)}${label}</button>`).join("")}</nav>`;
 }
 function pageTitle() {
-  return ({home:isTeacher()?"Tổng quan":"Đề ôn tập",progress:"Lộ trình cá nhân",compare:"So sánh tiến bộ",personal:"Ôn tập cá nhân hóa",students:"Danh sách học sinh",errors:"7 nhóm lỗi thường gặp",library:"Kho câu hỏi", "teacher-exams":"Quản lý đề ôn tập"})[currentPage]||"Tổng quan";
+  return ({home:isTeacher()?"Tổng quan":"Đề ôn tập",progress:"Lộ trình cá nhân",compare:"So sánh tiến bộ",personal:"Ôn tập cá nhân hóa",students:"Danh sách học sinh",errors:"Bản đồ nhóm lỗi",library:"Kho câu hỏi", "teacher-exams":"Quản lý đề ôn tập"})[currentPage]||"Tổng quan";
 }
 function pageView() {
   if(currentPage==="home") return isTeacher()?teacherHome():studentHome();
@@ -960,9 +961,14 @@ function studentsTable(users,clickable) {
 function errorsPage() {
   const teacher=isTeacher();
   const legacyNotice=teacher&&session?.source==="firebase"&&legacyErrorDocs.length?`<div class="legacy-error-notice"><div><strong>Tìm thấy ${legacyErrorDocs.length} tài liệu cũ trên thiết bị này</strong><p>Chúng chưa được gắn với tài khoản giáo viên nào. Bạn có thể xác nhận trước khi chuyển chúng sang tài khoản ${safe(userName())}.</p></div><button class="btn secondary" data-action="import-legacy-error-docs">Rà soát và chuyển</button></div>`:"";
-  return `${welcome("7 nhóm lỗi thường gặp","Sửa tên và mô tả ngay tại đây. Nội dung được chia sẻ đồng bộ giữa giáo viên.",`<button class="btn" data-action="upload-errors">${icon("upload")} Nạp tài liệu mã lỗi</button>`)}
-  <div class="grid stats">${statCard("Nhóm lỗi","07","","target","purple","Vị trí 1–7 giữ nguyên lịch sử thống kê")}${statCard("Tài liệu phân tích",data.errorDocs?.length||0,"","file","green","Tài liệu của giáo viên này")}${statCard("Mã lỗi đang dùng",errors.length,"","book","orange","Phân loại câu hỏi")}${statCard("Câu hỏi đã gắn mã",data.questions.filter(q=>q.errorId).length,"","chart","blue","Trong kho câu hỏi")}</div>
-  ${legacyNotice}<div class="error-groups">${errors.map((e,i)=>`<article class="card section-card error-group" data-error-index="${i}"><div class="error-display"><div class="error-head"><div><div class="eyebrow">NHÓM ${i+1} · MÃ ${safe(e[0])}</div><h2 class="error-name">${safe(e[1])}</h2></div><div class="error-card-actions"><span class="error-count">${aggregateMistakes(data.users.filter(u=>u.role==="student"))[i]} lần</span>${teacher?`<button class="text-button" type="button" data-action="edit-error-category" data-index="${i}">Sửa nội dung</button>`:""}</div></div><p class="error-description">${safe(e[2])}</p></div>${teacher?`<div class="error-edit-form" hidden><label>Mã lỗi<input class="error-code-input" maxlength="8" value="${safe(e[0])}" autocomplete="off"/></label><label>Tên nhóm lỗi<input class="error-name-input" maxlength="100" value="${safe(e[1])}"/></label><label>Mô tả nhóm lỗi<textarea class="error-description-input" maxlength="1600" rows="4">${safe(e[2])}</textarea></label><div class="error-edit-actions"><button class="btn" type="button" data-action="save-error-category" data-index="${i}">Lưu thay đổi</button><button class="btn secondary" type="button" data-action="cancel-error-edit" data-index="${i}">Hủy</button></div><small>Thống kê lịch sử gắn với vị trí nhóm ${i+1}; đổi mã không làm mất lịch sử. Nhập 1–8 chữ cái in hoa, có thể dùng chữ Đ.</small></div>`:""}</article>`).join("")}</div>
+  const mistakeCounts=aggregateMistakes(data.users.filter(user=>user.role==="student"));
+  return `${welcome("Bản đồ nhóm lỗi","Quản lý mã và nội dung của 7 nhóm. Vị trí số là mốc thống kê cố định.",`<button class="btn" data-action="upload-errors">${icon("upload")} Nạp tài liệu mã lỗi</button>`)}
+  <div class="error-page-intro"><div class="error-intro-icon">${icon("target")}</div><div><strong>Mã chữ có thể đổi; vị trí thống kê luôn được giữ</strong><p>Ví dụ: đổi mã DG thành ĐH ở nhóm 4. Câu hỏi và lịch sử cũ vẫn thuộc nhóm 4.</p></div><span>7 NHÓM · ĐỒNG BỘ</span></div>
+  <div class="grid stats">${statCard("Nhóm kiến thức","07","","target","purple","Thứ tự 1–7 không thay đổi")}${statCard("Tài liệu phân tích",data.errorDocs?.length||0,"","file","green","Tài liệu của giáo viên này")}${statCard("Mã lỗi đang dùng",errors.length,"","book","orange","Có thể đổi mã chữ")}${statCard("Câu hỏi đã gắn mã",data.questions.filter(question=>question.errorId).length,"","chart","blue","Trong kho câu hỏi")}</div>
+  ${legacyNotice}<div class="error-groups">${errors.map((category,index)=>{
+    const ordinal=index+1;
+    return `<article class="card section-card error-group" data-error-ordinal="${ordinal}"><div class="error-display"><div class="error-head"><div class="error-title-block"><span class="error-ordinal">NHÓM <b>${String(ordinal).padStart(2,"0")}</b></span><div><div class="eyebrow">MÃ HIỂN THỊ</div><div class="error-code-badge">${safe(category[0])}</div></div></div><div class="error-card-actions"><span class="error-count">${mistakeCounts[index]} lượt sai</span>${teacher?`<button class="text-button" type="button" data-action="edit-error-category" data-ordinal="${ordinal}">Chỉnh sửa <span aria-hidden="true">→</span></button>`:""}</div></div><h2 class="error-name">${safe(category[1])}</h2><p class="error-description">${safe(category[2])}</p></div>${teacher?`<div class="error-edit-form" hidden><div class="error-edit-heading"><span class="error-ordinal">MỐC THỐNG KÊ CỐ ĐỊNH</span><strong>Nhóm ${ordinal}</strong></div><label>Mã lỗi hiển thị<input class="error-code-input" maxlength="8" value="${safe(category[0])}" autocomplete="off" aria-label="Mã lỗi hiển thị của nhóm ${ordinal}" placeholder="Ví dụ: ĐH"/></label><label>Tên nhóm lỗi<input class="error-name-input" maxlength="100" value="${safe(category[1])}"/></label><label>Mô tả nhóm lỗi<textarea class="error-description-input" maxlength="1600" rows="4">${safe(category[2])}</textarea></label><div class="error-edit-actions"><button class="btn" type="button" data-action="save-error-category" data-ordinal="${ordinal}">Lưu thay đổi</button><button class="btn secondary" type="button" data-action="cancel-error-edit" data-ordinal="${ordinal}">Hủy</button></div><small>Đổi DG thành ĐH chỉ đổi mã hiển thị. Nhóm ${ordinal} vẫn là vị trí dùng để nối câu hỏi và thống kê cũ.</small></div>`:""}</article>`;
+  }).join("")}</div>
   <div class="card section-card error-docs-panel"><div class="section-heading"><div><h2>Tài liệu mã lỗi đã nạp</h2><p>Tài liệu được lưu cho tài khoản giáo viên và đồng bộ giữa các thiết bị</p></div></div>${data.errorDocs?.length?`<div class="assignment-list">${data.errorDocs.map(d=>`<article class="assignment"><div class="assignment-mark">${icon("file")}</div><div class="assignment-details"><strong>${safe(d.name)}</strong><span>${safe(d.summary)}</span></div><span class="tag">${d.text?.length||0} ký tự</span></article>`).join("")}</div>`:`<div class="empty">Chưa có tài liệu. Nạp Word, PDF có lớp văn bản hoặc tệp TXT; nội dung sẽ được rà soát trước khi lưu.</div>`}</div>`;
 }
 function libraryPage() {
@@ -1018,11 +1024,11 @@ async function handleAction(button) {
   }
   if(action==="save-error-category") {
     if(!isTeacher()){toast("Chỉ giáo viên mới được sửa nội dung mã lỗi.");return;}
-    const index=Number(button.dataset.index),card=button.closest(".error-group"),code=card?.querySelector(".error-code-input")?.value,name=card?.querySelector(".error-name-input")?.value,description=card?.querySelector(".error-description-input")?.value;
+    const ordinal=Number(button.dataset.ordinal),index=ordinal-1,card=button.closest(".error-group"),code=card?.querySelector(".error-code-input")?.value,name=card?.querySelector(".error-name-input")?.value,description=card?.querySelector(".error-description-input")?.value;
     if(!card)return;
     button.disabled=true;button.textContent="Đang đồng bộ…";
     try {
-      const updated=await updateErrorCategory(index,code,name,description);
+      const updated=await updateErrorCategory(ordinal,code,name,description);
       errors=errors.map((category,categoryIndex)=>categoryIndex===index?updated:category);
       render();toast(`Đã cập nhật nhóm ${index+1}; thống kê lịch sử vẫn giữ đúng vị trí.`);
     } catch(error) {

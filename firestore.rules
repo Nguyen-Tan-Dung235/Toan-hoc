@@ -27,7 +27,8 @@ service cloud.firestore {
           && category.keys().hasOnly(["ordinal", "code", "name", "description", "legacyCodes"])
           && category.ordinal == ordinal
           && category.code is string
-          && category.code.matches("^[A-ZĐÀ-Ỹ]{1,8}$")
+          && category.code.size() > 0
+          && category.code.size() <= 32
           && category.legacyCodes is list
           && category.legacyCodes.size() <= 32
           && category.name is string
