@@ -61,6 +61,8 @@ let firebaseDb = null;
 let firebaseFunctions = null;
 let questionSetUnsubscribe = null;
 let questionSetSyncGeneration = 0;
+let attemptUnsubscribe = null;
+let attemptSyncGeneration = 0;
 let registeringFirebaseAccount = false;
 let loginRole = "student";
 let currentQuestionIndex = 0;
@@ -97,6 +99,11 @@ function loadSession() {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch { return null; }
 }
 function setSession(user) {
+  if(attemptUnsubscribe&&(!user||session?.id!==user.id||session?.source!==user.source)) {
+    attemptUnsubscribe();
+    attemptUnsubscribe=null;
+    attemptSyncGeneration++;
+  }
   session = user;
   if(user)loginNotice="";
   if(user?.source==="firebase"&&user.role==="student") {
@@ -113,6 +120,7 @@ function setSession(user) {
   if(user?.source==="firebase") {
     void loadFirebaseAssignments();
     void loadFirebaseQuestionSets();
+    void loadFirebaseAttempts();
   }
 }
 async function configureFirebaseAuth() {
@@ -231,6 +239,77 @@ async function loadFirebaseAssignments() {
   } catch(error) {
     console.error("Could not load Firebase assignments.",error);
     toast(`Không tải được đề đã giao: ${firebaseFirestoreError(error)}`);
+    return false;
+  }
+}
+function firebaseAttemptPayload(attempt,userId) {
+  const id=String(attempt?.id||"");
+  if(!/^attempt-[A-Za-z0-9_-]{1,120}$/.test(id))throw new Error("Mã lượt làm bài không hợp lệ.");
+  const payload={
+    id,
+    userId,
+    title:String(attempt.title||"Bài ôn tập").slice(0,500),
+    source:attempt.source==="personal"?"personal":"teacher",
+    score:Number.isFinite(attempt.score)?attempt.score:null,
+    correct:Math.max(0,Math.floor(Number(attempt.correct)||0)),
+    total:Math.max(0,Math.floor(Number(attempt.total)||0)),
+    graded:Math.max(0,Math.floor(Number(attempt.graded)||0)),
+    duration:Math.max(0,Math.floor(Number(attempt.duration)||0)),
+    createdAt:typeof attempt.createdAt==="string"?attempt.createdAt:new Date().toISOString(),
+    mistakes:errors.map((_,index)=>Math.max(0,Math.floor(Number(attempt.mistakes?.[index])||0))),
+    questionTimes:Object.fromEntries(Object.entries(attempt.questionTimes||{}).filter(([,seconds])=>Number.isFinite(seconds)&&seconds>=0))
+  };
+  if(payload.graded>payload.total||payload.correct>payload.graded)throw new Error("Kết quả lượt làm bài không hợp lệ.");
+  if(new Blob([JSON.stringify(payload)]).size>850*1024)throw new Error("Kết quả bài làm vượt giới hạn lưu an toàn.");
+  return payload;
+}
+async function saveFirebaseAttempt(attempt,userId=session?.id) {
+  if(session?.source!=="firebase"||!userId||attempt?.userId!==userId)return false;
+  await configureFirestore();
+  const payload=firebaseAttemptPayload(attempt,userId);
+  const ref=firebaseSdk.doc(firebaseDb,"attempts",payload.id);
+  const existing=await firebaseRequest(firebaseSdk.getDoc(ref));
+  if(!existing.exists())await firebaseRequest(firebaseSdk.setDoc(ref,payload));
+  return true;
+}
+function sortAttempts(attempts) {
+  return attempts.slice().sort((a,b)=>Date.parse(a.createdAt||"")-Date.parse(b.createdAt||"")||String(a.id).localeCompare(String(b.id)));
+}
+async function loadFirebaseAttempts() {
+  if(!session?.id||session.source!=="firebase")return false;
+  const userId=session.id,staffView=isTeacher(),generation=++attemptSyncGeneration;
+  attemptUnsubscribe?.();
+  attemptUnsubscribe=null;
+  const localAttempts=data.attempts.filter(attempt=>attempt.userId===userId);
+  data.attempts=sortAttempts(localAttempts);
+  saveData();
+  if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
+  try {
+    await configureFirestore();
+    if(generation!==attemptSyncGeneration||session?.id!==userId)return false;
+    for(const attempt of localAttempts) {
+      try { await saveFirebaseAttempt(attempt,userId); }
+      catch(error) { console.warn("A locally saved attempt will be retried later.",error); }
+    }
+    if(generation!==attemptSyncGeneration||session?.id!==userId)return false;
+    const attempts=firebaseSdk.collection(firebaseDb,"attempts");
+    const query=staffView?attempts:firebaseSdk.query(attempts,firebaseSdk.where("userId","==",userId));
+    attemptUnsubscribe=firebaseSdk.onSnapshot(query,snapshot=>{
+      if(generation!==attemptSyncGeneration||session?.id!==userId)return;
+      const remote=snapshot.docs.map(document=>({...document.data()}));
+      const remoteIds=new Set(remote.map(attempt=>attempt.id));
+      const localFallback=data.attempts.filter(attempt=>attempt.userId===userId&&!remoteIds.has(attempt.id));
+      data.attempts=sortAttempts([...remote,...localFallback]);
+      saveData();
+      if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
+    },error=>{
+      console.error("Firebase attempt listener failed.",error);
+      toast(`Không đồng bộ được lịch sử làm bài: ${firebaseFirestoreError(error)}`);
+    });
+    return true;
+  } catch(error) {
+    console.error("Could not sync Firebase attempts.",error);
+    toast(`Lịch sử vẫn được giữ trên thiết bị nhưng chưa đồng bộ: ${firebaseFirestoreError(error)}`);
     return false;
   }
 }
@@ -622,11 +701,13 @@ function donut(counts) {
   return `<div style="display:flex;align-items:center;gap:17px"><div style="width:124px;height:124px;border-radius:50%;background:conic-gradient(${parts.join(",")});position:relative;flex:none"><div style="position:absolute;inset:23px;background:white;border-radius:50%;display:grid;place-content:center;text-align:center"><b style="font-size:19px">${total}</b><span style="font-size:8px;color:#9aa3b3">lượt sai</span></div></div><div style="display:grid;gap:5px">${errors.map((e,i)=>`<span style="font-size:8px;color:#7f899b"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${colors[i]};margin-right:5px"></i>${e[0]} ${e[1]} <b style="color:#47536a">${counts[i]||0}</b></span>`).join("")}</div></div>`;
 }
 function teacherHome() {
-  const students=data.users.filter(u=>u.role==="student"),average=avg(students.map(u=>Number(userStats(u).average)).filter(Number.isFinite)),recent=data.assignments.slice(0,3);
-  return `${welcome(`Chào buổi sáng, ${safe(userName())} 👋`,"Cùng xem tình hình học tập và giúp học sinh tiến bộ hơn nhé.",`<button class="date-chip">${icon("calendar")} 05 tháng 10, 2026</button>`)}
-  <div class="grid stats">${statCard("Tổng số học sinh",students.length,"+2","users","purple","Trong các lớp bạn phụ trách")}${statCard("Đề ôn tập",data.assignments.length,"+1","book","green","Đã tạo trên hệ thống")}${statCard("Điểm trung bình lớp",average,"+0.4","chart","orange","So với tháng trước")}${statCard("Bài đã hoàn thành",data.attempts.length+36,"+12%","target","blue","Trong tuần này")}</div>
-  <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Tiến bộ của lớp</h2><p>Điểm trung bình theo các lần luyện tập</p></div><div class="chart-legend"><span><i class="legend-dot"></i>Điểm trung bình</span><select class="select-small"><option>6 lần gần nhất</option><option>Toàn bộ</option></select></div></div>${scoreChart([5.8,6.3,6.1,7.2,7.8,8.1])}</section>
-  <section class="card section-card"><div class="section-heading"><div><h2>Hoạt động gần đây</h2><p>Cập nhật từ học sinh của bạn</p></div><button class="text-button" data-page="compare">Xem tất cả</button></div><div class="activity-list">${students.slice(0,3).map((u,i)=>`<div class="activity"><div class="avatar">${initial(u.name)}</div><div class="activity-main"><strong>${safe(u.name)} đã hoàn thành đề ôn</strong><span>${["12 phút trước","1 giờ trước","Hôm qua"][i]}</span></div><span class="activity-score">${userStats(u).latest||"—"}/10</span></div>`).join("")}</div></section></div>
+  const students=data.users.filter(u=>u.role==="student"),allAttempts=sortAttempts(data.attempts),scored=allAttempts.filter(attempt=>Number.isFinite(attempt.score)),average=avg(scored.map(attempt=>attempt.score)),recent=data.assignments.slice(0,3),activities=allAttempts.slice(-3).reverse();
+  const dateLabel=new Date().toLocaleDateString("vi-VN",{day:"2-digit",month:"long",year:"numeric"});
+  const timesAgo=value=>{const seconds=Math.max(0,Math.floor((Date.now()-Date.parse(value||""))/1000));if(!Number.isFinite(seconds))return "Vừa cập nhật";if(seconds<60)return "Vừa xong";if(seconds<3600)return `${Math.floor(seconds/60)} phút trước`;if(seconds<86400)return `${Math.floor(seconds/3600)} giờ trước`;return new Date(value).toLocaleDateString("vi-VN")};
+  return `${welcome(`Chào ${safe(userName())} 👋`,"Cùng xem tình hình học tập và giúp học sinh tiến bộ hơn nhé.",`<button class="date-chip">${icon("calendar")} ${dateLabel}</button>`)}
+  <div class="grid stats">${statCard("Tổng số học sinh",students.length,"","users","purple","Tài khoản học sinh trên hệ thống")}${statCard("Đề ôn tập",data.assignments.length,"","book","green","Đề bạn đã tạo hoặc giao")}${statCard("Điểm trung bình",average,"","chart","orange","Trên các lượt đã chấm")}${statCard("Bài đã hoàn thành",allAttempts.length,"","target","blue","Lịch sử đã đồng bộ")}</div>
+  <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Tiến bộ của lớp</h2><p>Điểm các lượt luyện tập đã chấm</p></div><div class="chart-legend"><span><i class="legend-dot"></i>Điểm số</span></div></div>${scoreChart(scored.slice(-6).map(attempt=>attempt.score))}</section>
+  <section class="card section-card"><div class="section-heading"><div><h2>Hoạt động gần đây</h2><p>Cập nhật từ các lượt làm bài đã đồng bộ</p></div><button class="text-button" data-page="compare">Xem tất cả</button></div><div class="activity-list">${activities.length?activities.map(attempt=>{const student=students.find(user=>user.id===attempt.userId);return `<div class="activity"><div class="avatar">${initial(student?.name||"HS")}</div><div class="activity-main"><strong>${safe(student?.name||"Học sinh")} đã hoàn thành ${safe(attempt.title)}</strong><span>${timesAgo(attempt.createdAt)}</span></div><span class="activity-score">${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</span></div>`}).join(""):`<div class="empty">Chưa có lượt làm bài được đồng bộ.</div>`}</div></section></div>
   <div class="grid bottom-grid"><section class="card section-card"><div class="section-heading"><div><h2>Đề ôn tập gần đây</h2><p>Theo dõi những đề bạn đã giao</p></div><button class="text-button" data-page="teacher-exams">Quản lý đề →</button></div>${assignmentList(recent)}</section><section class="card section-card"><div class="section-heading"><div><h2>Nhóm lỗi cần lưu ý</h2><p>Lỗi phổ biến qua các lượt làm gần nhất</p></div><button class="text-button" data-page="errors">Chi tiết</button></div>${donut(aggregateMistakes(students))}</section></div>`;
 }
 function aggregateMistakes(users) { return errors.map((_,i)=>users.reduce((n,u)=>n+(userStats(u).counts[i]||0),0)); }
@@ -1999,15 +2080,19 @@ function finishExam() {
   const total=currentPractice.questions.length;
   const score=graded.length?Math.round((correct/graded.length)*100)/10:null;
   const answeredUnknown=currentPractice.questions.filter(q=>!q.answerKey&&currentPractice.answers[q.id]).length;
-  const attempt={id:`attempt-${Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map(e=>currentPractice.questions.filter(q=>q.errorId===e[0]&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:currentPractice.questionTimes};
+  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map(e=>currentPractice.questions.filter(q=>q.errorId===e[0]&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:currentPractice.questionTimes};
   data.attempts.push(attempt);saveData();currentPractice=null;currentPage="progress";render();
-  showModal("Hoàn thành bài ôn tập",`<div style="text-align:center;padding:12px"><div class="stat-icon purple" style="width:58px;height:58px;border-radius:18px;margin:auto">${icon("spark")}</div><h1 style="font-size:31px;margin-top:14px">${score===null?"Chưa chấm":`${score}/10`}</h1><p class="subhead">${score===null?`Đã lưu câu trả lời và thời gian làm bài. ${total} câu chưa có đáp án để chấm tự động.`:`Bạn trả lời đúng ${correct}/${graded.length} câu đã có đáp án.`} ${answeredUnknown?`${answeredUnknown} câu chưa có đáp án đúng để đối chiếu. `:""}Thời gian: ${formatDuration(attempt.duration)}.</p></div>`,`<button class="btn" data-action="close-modal">Xem lộ trình</button>`);
+  if(session?.source==="firebase")void saveFirebaseAttempt(attempt).catch(error=>{console.error("Could not sync completed attempt.",error);toast("Đã lưu lượt làm trên thiết bị; hệ thống sẽ đồng bộ lại khi có mạng.")});
+  showModal("Hoàn thành bài ôn tập",`<div style="text-align:center;padding:12px"><div class="stat-icon purple" style="width:58px;height:58px;border-radius:18px;margin:auto">${icon("spark")}</div><h1 style="font-size:31px;margin-top:14px">${score===null?"Chưa chấm":`${score}/10`}</h1><p class="subhead">${score===null?`Lượt làm đã được ghi nhận. ${total} câu chưa có đáp án để chấm tự động.`:`Bạn trả lời đúng ${correct}/${graded.length} câu đã có đáp án.`} ${answeredUnknown?`${answeredUnknown} câu chưa có đáp án đúng để đối chiếu. `:""}Thời gian: ${formatDuration(attempt.duration)}.</p></div>`,`<button class="btn" data-action="close-modal">Xem lộ trình</button>`);
 }
 function normalizeAnswer(value) {
   if(value&&typeof value==="object")return Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>`${key}:${item}`).join("|").toUpperCase();
   if(Array.isArray(value))return value.slice().sort().join("").toUpperCase();
   return String(value??"").trim().replace(/\s+/g,"").replace(/(\d),(\d)/g,"$1.$2").toUpperCase();
 }
+window.addEventListener("online",()=>{
+  if(session?.source==="firebase")void loadFirebaseAttempts();
+});
 if(FIREBASE_CONFIG) {
   session=null;
   localStorage.removeItem(SESSION_KEY);

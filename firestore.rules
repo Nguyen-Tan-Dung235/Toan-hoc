@@ -79,6 +79,38 @@ service cloud.firestore {
           && assignment().data.teacherId == request.auth.uid;
       }
     }
+    match /attempts/{attemptId} {
+      allow read: if signedIn() && (staff() || resource.data.userId == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.id == attemptId
+        && request.resource.data.keys().hasAll([
+          "id", "userId", "title", "source", "score", "correct", "total",
+          "graded", "duration", "createdAt", "mistakes", "questionTimes"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "id", "userId", "title", "source", "score", "correct", "total",
+          "graded", "duration", "createdAt", "mistakes", "questionTimes"
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 500
+        && request.resource.data.source in ["personal", "teacher"]
+        && (request.resource.data.score == null
+          || (request.resource.data.score is number && request.resource.data.score >= 0 && request.resource.data.score <= 10))
+        && request.resource.data.correct is int
+        && request.resource.data.total is int
+        && request.resource.data.graded is int
+        && request.resource.data.duration is int
+        && request.resource.data.correct >= 0
+        && request.resource.data.graded >= request.resource.data.correct
+        && request.resource.data.total >= request.resource.data.graded
+        && request.resource.data.duration >= 0
+        && request.resource.data.createdAt is string
+        && request.resource.data.mistakes is list
+        && request.resource.data.mistakes.size() == 7
+        && request.resource.data.questionTimes is map;
+      allow update, delete: if false;
+    }
     match /questionSets/{setId} {
       allow read: if signedIn() && (
         staff() || (resource.data.status == "published" && resource.data.hiddenFromStudents == false)
