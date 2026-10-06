@@ -270,18 +270,29 @@ function firebaseRequest(request) {
 }
 function normalizeErrorCategories(categories) {
   const entries=Array.isArray(categories)?categories:[];
-  const byCode=new Map(entries.map(category=>{
-    const item=Array.isArray(category)
-      ?{code:category[0],name:category[1],description:category[2]}
-      :category||{};
-    return [String(item.code||""),item];
-  }));
-  return DEFAULT_ERRORS.map(([code,defaultName,defaultDescription])=>{
-    const item=byCode.get(code)||{};
-    const name=typeof item.name==="string"&&item.name.trim()?item.name.trim().slice(0,100):defaultName;
-    const description=typeof item.description==="string"&&item.description.trim()?item.description.trim().slice(0,1600):defaultDescription;
-    return [code,name,description];
+  return DEFAULT_ERRORS.map(([defaultCode,defaultName,defaultDescription],index)=>{
+    const item=(entries.find(category=>!Array.isArray(category)&&Number(category?.ordinal)===index+1)||entries[index])||{};
+    const value=Array.isArray(item)?{code:item[0],name:item[1],description:item[2],legacyCodes:item[3]}:item;
+    const code=String(value.code||defaultCode).trim().toLocaleUpperCase("vi");
+    const name=typeof value.name==="string"&&value.name.trim()?value.name.trim().slice(0,100):defaultName;
+    const description=typeof value.description==="string"&&value.description.trim()?value.description.trim().slice(0,1600):defaultDescription;
+    const legacyCodes=[...new Set([defaultCode,...(Array.isArray(value.legacyCodes)?value.legacyCodes:[]),...(value.code&&value.code!==code?[value.code]:[])].map(alias=>String(alias||"").trim().toLocaleUpperCase("vi")).filter(Boolean))];
+    return [code,name,description,legacyCodes];
   });
+}
+function errorCategoryCodes(category) {
+  return [...new Set([category?.[0],...(Array.isArray(category?.[3])?category[3]:[])].filter(Boolean).map(code=>String(code).toLocaleUpperCase("vi")))];
+}
+function errorIndexForCode(code) {
+  const normalized=String(code||"").trim().toLocaleUpperCase("vi");
+  return errors.findIndex(category=>errorCategoryCodes(category).includes(normalized));
+}
+function errorLabelForCode(code) {
+  const index=errorIndexForCode(code);
+  return index>=0?errors[index][0]:String(code||"");
+}
+function questionMatchesErrorIndex(question,index) {
+  return index>=0&&errorCategoryCodes(errors[index]).includes(String(question?.errorId||"").trim().toLocaleUpperCase("vi"));
 }
 async function loadFirebaseErrorCategories() {
   if(!session?.id||session.source!=="firebase")return false;
@@ -310,24 +321,31 @@ async function loadFirebaseErrorCategories() {
     return false;
   }
 }
-async function updateErrorCategory(code,name,description) {
+async function updateErrorCategory(index,code,name,description) {
   if(!isTeacher()||session?.source!=="firebase")throw new Error("Chỉ giáo viên đăng nhập Firebase mới có thể sửa nội dung dùng chung.");
-  const defaultCategory=DEFAULT_ERRORS.find(category=>category[0]===code);
-  if(!defaultCategory)throw new Error("Mã lỗi không hợp lệ.");
+  if(!Number.isInteger(index)||index<0||index>=DEFAULT_ERRORS.length)throw new Error("Vị trí mã lỗi không hợp lệ.");
+  const normalizedCode=String(code||"").trim().toLocaleUpperCase("vi");
+  if(!/^[A-ZĐÀ-Ỹ]{1,8}$/.test(normalizedCode))throw new Error("Mã lỗi chỉ gồm 1–8 chữ cái in hoa, không có dấu cách hoặc ký tự khác.");
   const normalizedName=String(name||"").trim(),normalizedDescription=String(description||"").trim();
   if(!normalizedName||normalizedName.length>100)throw new Error("Tên mã lỗi cần có từ 1 đến 100 ký tự.");
   if(!normalizedDescription||normalizedDescription.length>1600)throw new Error("Mô tả cần có từ 1 đến 1.600 ký tự.");
   await configureFirestore();
   const ref=firebaseSdk.doc(firebaseDb,"settings","errorCategories");
-  await firebaseRequest(firebaseSdk.runTransaction(firebaseDb,async transaction=>{
+  const updatedCategory=await firebaseRequest(firebaseSdk.runTransaction(firebaseDb,async transaction=>{
     const snapshot=await transaction.get(ref);
-    const current=snapshot.exists()?normalizeErrorCategories(snapshot.data().categories):structuredClone(DEFAULT_ERRORS);
-    const updated=current.map(category=>category[0]===code?[code,normalizedName,normalizedDescription]:category);
+    const current=snapshot.exists()?normalizeErrorCategories(snapshot.data().categories):normalizeErrorCategories(DEFAULT_ERRORS);
+    const reusedCode=current.some((category,categoryIndex)=>categoryIndex!==index&&errorCategoryCodes(category).includes(normalizedCode));
+    if(reusedCode)throw new Error("Mã này đang được dùng hoặc đã là mã cũ của nhóm khác.");
+    const previous=current[index];
+    const aliases=[...new Set([...errorCategoryCodes(previous),normalizedCode])];
+    const updated=current.map((category,categoryIndex)=>categoryIndex===index?[normalizedCode,normalizedName,normalizedDescription,aliases]:category);
     transaction.set(ref,{
-      categories:updated.map(([categoryCode,categoryName,categoryDescription])=>({code:categoryCode,name:categoryName,description:categoryDescription})),
+      categories:updated.map(([categoryCode,categoryName,categoryDescription,legacyCodes],categoryIndex)=>({ordinal:categoryIndex+1,code:categoryCode,name:categoryName,description:categoryDescription,legacyCodes:legacyCodes.filter(alias=>alias!==categoryCode)})),
       updatedAt:new Date().toISOString(),updatedBy:session.id
     });
+    return updated[index];
   }));
+  return updatedCategory;
 }
 async function loadFirebaseErrorDocs() {
   if(!session?.id||session.source!=="firebase"||!isTeacher())return false;
@@ -943,8 +961,8 @@ function errorsPage() {
   const teacher=isTeacher();
   const legacyNotice=teacher&&session?.source==="firebase"&&legacyErrorDocs.length?`<div class="legacy-error-notice"><div><strong>Tìm thấy ${legacyErrorDocs.length} tài liệu cũ trên thiết bị này</strong><p>Chúng chưa được gắn với tài khoản giáo viên nào. Bạn có thể xác nhận trước khi chuyển chúng sang tài khoản ${safe(userName())}.</p></div><button class="btn secondary" data-action="import-legacy-error-docs">Rà soát và chuyển</button></div>`:"";
   return `${welcome("7 nhóm lỗi thường gặp","Sửa tên và mô tả ngay tại đây. Nội dung được chia sẻ đồng bộ giữa giáo viên.",`<button class="btn" data-action="upload-errors">${icon("upload")} Nạp tài liệu mã lỗi</button>`)}
-  <div class="grid stats">${statCard("Nhóm lỗi","07","","target","purple","Mã và thứ tự được giữ ổn định")}${statCard("Tài liệu phân tích",data.errorDocs?.length||0,"","file","green","Tài liệu của giáo viên này")}${statCard("Mã lỗi đang dùng",errors.length,"","book","orange","Phân loại câu hỏi")}${statCard("Câu hỏi đã gắn mã",data.questions.filter(q=>q.errorId).length,"","chart","blue","Trong kho câu hỏi")}</div>
-  ${legacyNotice}<div class="error-groups">${errors.map((e,i)=>`<article class="card section-card error-group" data-error-code="${e[0]}"><div class="error-display"><div class="error-head"><div><div class="eyebrow">MÃ LỖI ${e[0]}</div><h2 class="error-name">${safe(e[1])}</h2></div><div class="error-card-actions"><span class="error-count">${aggregateMistakes(data.users.filter(u=>u.role==="student"))[i]} lần</span>${teacher?`<button class="text-button" type="button" data-action="edit-error-category" data-id="${e[0]}">Sửa nội dung</button>`:""}</div></div><p class="error-description">${safe(e[2])}</p></div>${teacher?`<div class="error-edit-form" hidden><label>Tên nhóm lỗi<input class="error-name-input" maxlength="100" value="${safe(e[1])}"/></label><label>Mô tả nhóm lỗi<textarea class="error-description-input" maxlength="1600" rows="4">${safe(e[2])}</textarea></label><div class="error-edit-actions"><button class="btn" type="button" data-action="save-error-category" data-id="${e[0]}">Lưu thay đổi</button><button class="btn secondary" type="button" data-action="cancel-error-edit" data-id="${e[0]}">Hủy</button></div><small>Mã ${e[0]} và vị trí thống kê được giữ nguyên để bảo toàn dữ liệu cũ.</small></div>`:""}</article>`).join("")}</div>
+  <div class="grid stats">${statCard("Nhóm lỗi","07","","target","purple","Vị trí 1–7 giữ nguyên lịch sử thống kê")}${statCard("Tài liệu phân tích",data.errorDocs?.length||0,"","file","green","Tài liệu của giáo viên này")}${statCard("Mã lỗi đang dùng",errors.length,"","book","orange","Phân loại câu hỏi")}${statCard("Câu hỏi đã gắn mã",data.questions.filter(q=>q.errorId).length,"","chart","blue","Trong kho câu hỏi")}</div>
+  ${legacyNotice}<div class="error-groups">${errors.map((e,i)=>`<article class="card section-card error-group" data-error-index="${i}"><div class="error-display"><div class="error-head"><div><div class="eyebrow">NHÓM ${i+1} · MÃ ${safe(e[0])}</div><h2 class="error-name">${safe(e[1])}</h2></div><div class="error-card-actions"><span class="error-count">${aggregateMistakes(data.users.filter(u=>u.role==="student"))[i]} lần</span>${teacher?`<button class="text-button" type="button" data-action="edit-error-category" data-index="${i}">Sửa nội dung</button>`:""}</div></div><p class="error-description">${safe(e[2])}</p></div>${teacher?`<div class="error-edit-form" hidden><label>Mã lỗi<input class="error-code-input" maxlength="8" value="${safe(e[0])}" autocomplete="off"/></label><label>Tên nhóm lỗi<input class="error-name-input" maxlength="100" value="${safe(e[1])}"/></label><label>Mô tả nhóm lỗi<textarea class="error-description-input" maxlength="1600" rows="4">${safe(e[2])}</textarea></label><div class="error-edit-actions"><button class="btn" type="button" data-action="save-error-category" data-index="${i}">Lưu thay đổi</button><button class="btn secondary" type="button" data-action="cancel-error-edit" data-index="${i}">Hủy</button></div><small>Thống kê lịch sử gắn với vị trí nhóm ${i+1}; đổi mã không làm mất lịch sử. Nhập 1–8 chữ cái in hoa, có thể dùng chữ Đ.</small></div>`:""}</article>`).join("")}</div>
   <div class="card section-card error-docs-panel"><div class="section-heading"><div><h2>Tài liệu mã lỗi đã nạp</h2><p>Tài liệu được lưu cho tài khoản giáo viên và đồng bộ giữa các thiết bị</p></div></div>${data.errorDocs?.length?`<div class="assignment-list">${data.errorDocs.map(d=>`<article class="assignment"><div class="assignment-mark">${icon("file")}</div><div class="assignment-details"><strong>${safe(d.name)}</strong><span>${safe(d.summary)}</span></div><span class="tag">${d.text?.length||0} ký tự</span></article>`).join("")}</div>`:`<div class="empty">Chưa có tài liệu. Nạp Word, PDF có lớp văn bản hoặc tệp TXT; nội dung sẽ được rà soát trước khi lưu.</div>`}</div>`;
 }
 function libraryPage() {
@@ -990,7 +1008,7 @@ async function handleAction(button) {
   if(action==="edit-error-category") {
     if(!isTeacher())return;
     const card=button.closest(".error-group");
-    if(card){card.querySelector(".error-display").hidden=true;card.querySelector(".error-edit-form").hidden=false;card.querySelector(".error-name-input").focus();}
+    if(card){card.querySelector(".error-display").hidden=true;card.querySelector(".error-edit-form").hidden=false;card.querySelector(".error-code-input").focus();}
     return;
   }
   if(action==="cancel-error-edit") {
@@ -1000,13 +1018,13 @@ async function handleAction(button) {
   }
   if(action==="save-error-category") {
     if(!isTeacher()){toast("Chỉ giáo viên mới được sửa nội dung mã lỗi.");return;}
-    const card=button.closest(".error-group"),name=card?.querySelector(".error-name-input")?.value,description=card?.querySelector(".error-description-input")?.value;
+    const index=Number(button.dataset.index),card=button.closest(".error-group"),code=card?.querySelector(".error-code-input")?.value,name=card?.querySelector(".error-name-input")?.value,description=card?.querySelector(".error-description-input")?.value;
     if(!card)return;
     button.disabled=true;button.textContent="Đang đồng bộ…";
     try {
-      await updateErrorCategory(id,name,description);
-      errors=errors.map(category=>category[0]===id?[id,name.trim(),description.trim()]:category);
-      render();toast(`Đã cập nhật mã ${id} cho giáo viên và học sinh.`);
+      const updated=await updateErrorCategory(index,code,name,description);
+      errors=errors.map((category,categoryIndex)=>categoryIndex===index?updated:category);
+      render();toast(`Đã cập nhật nhóm ${index+1}; thống kê lịch sử vẫn giữ đúng vị trí.`);
     } catch(error) {
       console.error("Could not update shared error category.",error);
       button.disabled=false;button.textContent="Lưu thay đổi";
@@ -1161,7 +1179,7 @@ async function handleAction(button) {
   }
   if(action==="create-personal"){
     const setIds=[...document.querySelectorAll(".set-check:checked")].map(el=>el.value);
-    const errorIds=[...document.querySelectorAll(".error-check:checked")].map(el=>errors[Number(el.value)]?.[0]).filter(Boolean);
+    const errorIds=[...document.querySelectorAll(".error-check:checked")].map(el=>String(el.value));
     showExamModal(true,null,setIds,errorIds);return;
   }
   if(action==="select-student"){selectedStudent=id;currentPage="compare";render();return;}
@@ -1407,7 +1425,7 @@ function importReviewMarkup(parsed) {
   const flagged=parsed.questions.filter(q=>q.classificationConfidence==="review"||!q.errorId||!q.answerKey||(q.sourceImageOnly&&q.sourceImageRects?.some((rect,index)=>!q.sourceImageCrops?.[index]))).length;
   return `<div class="review-summary"><b>${parsed.questions.length} câu</b><span>${parsed.imageCount} hình</span><span data-review-flag-count>Cần rà soát kỹ: <b>${flagged}</b></span>${sections.map(section=>`<span>${section}: <b>${sectionCounts[section]}</b></span>`).join("")}</div><div class="question-preview review-list">${parsed.questions.map((q,i)=>{
     const issues=[q.classificationConfidence==="review"?"Phân loại cần kiểm tra":"",!q.errorId?"Thiếu mã lỗi":"",!q.answerKey?"Chưa có đáp án đúng":"",q.sourceImageOnly&&q.sourceImageRects?.some((rect,index)=>!q.sourceImageCrops?.[index])?"Ảnh câu chưa cắt":""].filter(Boolean);
-    return `<article class="review-row ${issues.length?"has-review-issue":""}" data-question-id="${safe(q.id)}"><div class="review-info"><strong>Câu ${i+1}${issues.length?`<span class="review-issue">${issues.join(" · ")}</span>`:'<span class="review-ok">Đã nhận diện</span>'}</strong><span>${q.sourceImageOnly?"Xem và căn chỉnh ảnh trọn câu, gồm nội dung và các phương án.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><small>${q.choices?.length?`${q.choices.length} nhãn phương án`:"Trả lời bằng số / ký hiệu"} · ${q.errorId||"chưa gắn mã"}</small></div><select aria-label="Phần đề câu ${i+1}" class="import-section compact-select" data-question-id="${safe(q.id)}">${sections.map(section=>`<option ${q.section===section?"selected":""}>${section}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="import-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map(error=>`<option value="${error[0]}" ${q.errorId===error[0]?"selected":""}>${error[0]}</option>`).join("")}</select><details class="review-detail"><summary>${q.sourceImageRects?.length?"Xem và căn chỉnh ảnh câu hỏi":"Xem nội dung, đáp án, hình vẽ"}</summary><div class="doc-html">${q.sourceImageRects?.length?renderQuestionImageReview(q,parsed.sourcePages):`${q.html||safe(q.content)}${renderImportChoices(q)}`}</div>${!q.sourceImageOnly?`<label class="answer-key-label">Đáp án đúng <input class="import-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2, 3/4":"A/B/C/D hoặc chuỗi Đ/S"}"/></label>`:`<label class="answer-key-label">Đáp án đúng <input class="import-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="Giáo viên nhập A/B/C/D"/></label>`}</details></article>`;
+    return `<article class="review-row ${issues.length?"has-review-issue":""}" data-question-id="${safe(q.id)}"><div class="review-info"><strong>Câu ${i+1}${issues.length?`<span class="review-issue">${issues.join(" · ")}</span>`:'<span class="review-ok">Đã nhận diện</span>'}</strong><span>${q.sourceImageOnly?"Xem và căn chỉnh ảnh trọn câu, gồm nội dung và các phương án.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><small>${q.choices?.length?`${q.choices.length} nhãn phương án`:"Trả lời bằng số / ký hiệu"} · ${safe(errorLabelForCode(q.errorId)||"chưa gắn mã")}</small></div><select aria-label="Phần đề câu ${i+1}" class="import-section compact-select" data-question-id="${safe(q.id)}">${sections.map(section=>`<option ${q.section===section?"selected":""}>${section}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="import-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map(error=>`<option value="${safe(error[0])}" ${errorCategoryCodes(error).includes(String(q.errorId||"").toLocaleUpperCase("vi"))?"selected":""}>${safe(error[0])}</option>`).join("")}</select><details class="review-detail"><summary>${q.sourceImageRects?.length?"Xem và căn chỉnh ảnh câu hỏi":"Xem nội dung, đáp án, hình vẽ"}</summary><div class="doc-html">${q.sourceImageRects?.length?renderQuestionImageReview(q,parsed.sourcePages):`${q.html||safe(q.content)}${renderImportChoices(q)}`}</div>${!q.sourceImageOnly?`<label class="answer-key-label">Đáp án đúng <input class="import-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2, 3/4":"A/B/C/D hoặc chuỗi Đ/S"}"/></label>`:`<label class="answer-key-label">Đáp án đúng <input class="import-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="Giáo viên nhập A/B/C/D"/></label>`}</details></article>`;
   }).join("")}</div><p class="notice">${aiNotice} ${hasPdfSource?"Ảnh PDF được cắt theo câu làm gợi ý; mở từng câu để căn lại khung từ ảnh trang gốc. Đáp án lựa chọn sẽ nằm trong ảnh, không chép lại nội dung phương án.":"Ảnh và công thức Word được giữ nguyên; kiểm tra phần thi, mã lỗi và đáp án trước khi lưu."} Các câu có điểm cần rà soát được đánh dấu nổi bật.</p>`;
 }
 function questionSourceImageHtml(question) {
@@ -1417,8 +1435,19 @@ function renderQuestionImageReview(question,sourcePages={}) {
   return `<div class="question-source-review">${(question.sourceImageRects||[]).map((rect,index)=>{
     const crop=question.sourceImageCrops?.[index];
     const source=sourcePages[rect.page];
-    return `<section class="question-image-part"><div class="question-image-preview">${crop?`<img class="pdf-source-image" src="${safe(crop)}" alt="Ảnh câu hỏi đã cắt"/>`:'<div class="question-image-empty">Ảnh trang nguồn chưa được cắt thành câu hỏi.</div>'}</div><button type="button" class="btn secondary question-crop-open" data-question-id="${safe(question.id)}" data-part-index="${index}" ${source?"": "disabled"}>${crop?"Căn chỉnh khung ảnh câu hỏi":"Cắt ảnh câu hỏi"}</button><div class="question-crop-editor" data-question-id="${safe(question.id)}" data-part-index="${index}" data-source-page="${rect.page}" hidden><p class="subhead">Giữ chuột trái và kéo để vẽ khung mới quanh trọn câu hỏi cùng các phương án. Có thể chọn “Dời khung” để dịch chuyển vùng đã khoanh.</p><div class="question-crop-stage"><img class="question-crop-source" alt="Trang PDF gốc"/><div class="question-crop-selection" hidden></div></div><div><button type="button" class="btn question-crop-save">Dùng khung này</button><button type="button" class="btn secondary question-crop-move">Dời khung</button><button type="button" class="text-button question-crop-cancel">Hủy</button></div></div></section>`;
+    return `<section class="question-image-part"><div class="question-image-preview">${crop?`<img class="pdf-source-image" src="${safe(crop)}" alt="Ảnh câu hỏi đã cắt"/>`:'<div class="question-image-empty">Ảnh trang nguồn chưa được cắt thành câu hỏi.</div>'}</div><button type="button" class="btn secondary question-crop-open" data-question-id="${safe(question.id)}" data-part-index="${index}" ${source?"": "disabled"}>${crop?"Căn chỉnh khung ảnh câu hỏi":"Cắt ảnh câu hỏi"}</button><div class="question-crop-editor" data-question-id="${safe(question.id)}" data-part-index="${index}" data-source-page="${rect.page}" hidden><p class="subhead">Giữ chuột trái và kéo khung đỏ quanh trọn câu hỏi cùng các phương án. Ảnh xem trước bên dưới sẽ cho biết chính xác vùng được lưu.</p><div class="question-crop-stage"><img class="question-crop-source" alt="Trang PDF gốc"/><div class="question-crop-selection" hidden></div></div><div class="question-crop-output-wrap"><strong>Ảnh sẽ lưu theo khung đỏ</strong><canvas class="question-crop-output"></canvas></div><div><button type="button" class="btn question-crop-save">Dùng khung này</button><button type="button" class="btn secondary question-crop-move">Dời khung</button><button type="button" class="text-button question-crop-cancel">Hủy</button></div></div></section>`;
   }).join("")}</div>`;
+}
+function renderSavedQuestionImageReview(question,set) {
+  const parsed=new DOMParser().parseFromString(question.html||"","text/html");
+  const images=[...parsed.body.querySelectorAll("img")];
+  if(!images.length)return `<div class="doc-html">${question.html||safe(question.content)}</div>`;
+  const rects=question.sourceImageRects||[];
+  return `<div class="doc-html saved-question-image-content">${question.html}</div>${images.map((image,index)=>{
+    const rect=rects[index];
+    const hasSourcePage=rect?.page!==null&&rect?.page!==undefined&&Number.isFinite(Number(rect.page));
+    return `<section class="saved-question-image-part"><button type="button" class="btn secondary saved-question-crop-open" data-set-id="${safe(set.id)}" data-question-id="${safe(question.id)}" data-part-index="${index}">${hasSourcePage?"Căn lại từ trang gốc":"Chỉnh ảnh đã lưu"}</button><div class="question-crop-editor saved-question-crop-editor" data-set-id="${safe(set.id)}" data-question-id="${safe(question.id)}" data-part-index="${index}" hidden><p class="subhead" data-saved-crop-help></p><div class="question-crop-stage"><img class="question-crop-source" alt="Ảnh nguồn để căn lại câu hỏi"/><div class="question-crop-selection" hidden></div></div><div class="question-crop-output-wrap"><strong>Ảnh sẽ lưu theo khung đỏ</strong><canvas class="question-crop-output"></canvas></div><div class="saved-crop-actions"><button type="button" class="btn saved-question-crop-save">Dùng khung này</button><button type="button" class="btn secondary question-crop-move">Dời khung</button><button type="button" class="text-button question-crop-cancel">Hủy</button></div></div></section>`;
+  }).join("")}`;
 }
 function renderImportChoices(question) {
   if(question.sourceImageOnly||!question.choices?.length)return "";
@@ -1441,14 +1470,16 @@ function bindImportReview() {
     const selection=editor.querySelector(".question-crop-selection");
     const sourcePage=pendingUpload?.parsed.sourcePages?.[rect.page];
     if(!sourcePage)return;
-    editor.querySelector(".question-crop-source").src=sourcePage;
+    const sourceImage=editor.querySelector(".question-crop-source");
     const hasCrop=Boolean(question.sourceImageCrops?.[partIndex]);
     editor.dataset.cropRect=hasCrop?JSON.stringify(rect):"null";
     editor.dataset.mode="draw";
     editor.querySelector(".question-crop-move").textContent="Dời khung";
     editor.querySelector(".question-crop-stage").classList.remove("is-moving");
-    if(hasCrop)drawQuestionCropSelection(selection,rect);else selection.hidden=true;
     editor.hidden=false;
+    sourceImage.onload=()=>{if(hasCrop){drawQuestionCropSelection(selection,rect);drawQuestionCropPreview(editor,rect);}};
+    sourceImage.src=sourcePage;
+    if(sourceImage.complete&&sourceImage.naturalWidth&&hasCrop){drawQuestionCropSelection(selection,rect);drawQuestionCropPreview(editor,rect);}else if(!hasCrop)selection.hidden=true;
     bindQuestionCropEditor(editor);
   });
   document.querySelectorAll(".question-crop-cancel").forEach(button=>button.onclick=()=>{button.closest(".question-crop-editor").hidden=true;});
@@ -1463,10 +1494,7 @@ function bindImportReview() {
     const partIndex=Number(editor.dataset.partIndex),rect=JSON.parse(editor.dataset.cropRect||"null");
     const image=editor.querySelector(".question-crop-source");
     if(!question||!rect||rect.width<.01||rect.height<.01||!image.naturalWidth){toast("Kéo để khoanh trọn câu hỏi và các phương án.");return;}
-    const sx=Math.max(0,Math.floor(rect.x*image.naturalWidth)),sy=Math.max(0,Math.floor(rect.y*image.naturalHeight));
-    const ex=Math.min(image.naturalWidth,Math.ceil((rect.x+rect.width)*image.naturalWidth));
-    const ey=Math.min(image.naturalHeight,Math.ceil((rect.y+rect.height)*image.naturalHeight));
-    const sw=Math.max(1,ex-sx),sh=Math.max(1,ey-sy);
+    const {sx,sy,sw,sh}=questionCropPixels(image,rect);
     const canvas=document.createElement("canvas");canvas.width=sw;canvas.height=sh;
     canvas.getContext("2d").drawImage(image,sx,sy,sw,sh,0,0,sw,sh);
     const crop=canvas.toDataURL("image/webp",.92);
@@ -1491,19 +1519,42 @@ function refreshImportReviewState(question) {
   if(!badge){badge=document.createElement("span");title.append(badge);}
   badge.className=issues.length?"review-issue":"review-ok";
   badge.textContent=issues.join(" · ")||"Đã nhận diện";
+  const meta=row.querySelector(".review-info small");
+  if(meta)meta.textContent=`${question.choices?.length?`${question.choices.length} nhãn phương án`:"Trả lời bằng số / ký hiệu"} · ${errorLabelForCode(question.errorId)||"chưa gắn mã"}`;
   const count=pendingUpload.parsed.questions.filter(item=>item.classificationConfidence==="review"||!item.errorId||!item.answerKey||(item.sourceImageOnly&&item.sourceImageRects?.some((rect,index)=>!item.sourceImageCrops?.[index]))).length;
   const counter=document.querySelector("[data-review-flag-count] b");if(counter)counter.textContent=count;
 }
 function drawQuestionCropSelection(selection,rect) {
   selection.hidden=false;
-  selection.style.left=`${rect.x*100}%`;selection.style.top=`${rect.y*100}%`;
-  selection.style.width=`${rect.width*100}%`;selection.style.height=`${rect.height*100}%`;
+  const stage=selection.parentElement,image=stage?.querySelector(".question-crop-source");
+  const stageBounds=stage?.getBoundingClientRect(),imageBounds=image?.getBoundingClientRect();
+  if(stageBounds?.width&&stageBounds.height&&imageBounds?.width&&imageBounds.height) {
+    selection.style.left=`${imageBounds.left-stageBounds.left+rect.x*imageBounds.width}px`;
+    selection.style.top=`${imageBounds.top-stageBounds.top+rect.y*imageBounds.height}px`;
+    selection.style.width=`${rect.width*imageBounds.width}px`;
+    selection.style.height=`${rect.height*imageBounds.height}px`;
+  } else {
+    selection.style.left=`${rect.x*100}%`;selection.style.top=`${rect.y*100}%`;
+    selection.style.width=`${rect.width*100}%`;selection.style.height=`${rect.height*100}%`;
+  }
+}
+function questionCropPixels(image,rect) {
+  const sx=Math.max(0,Math.floor(rect.x*image.naturalWidth)),sy=Math.max(0,Math.floor(rect.y*image.naturalHeight));
+  const ex=Math.min(image.naturalWidth,Math.ceil((rect.x+rect.width)*image.naturalWidth)),ey=Math.min(image.naturalHeight,Math.ceil((rect.y+rect.height)*image.naturalHeight));
+  return {sx,sy,sw:Math.max(1,ex-sx),sh:Math.max(1,ey-sy)};
+}
+function drawQuestionCropPreview(editor,rect) {
+  const image=editor.querySelector(".question-crop-source"),canvas=editor.querySelector(".question-crop-output");
+  if(!image?.naturalWidth||!canvas||rect.width<.01||rect.height<.01)return;
+  const {sx,sy,sw,sh}=questionCropPixels(image,rect);
+  canvas.width=sw;canvas.height=sh;
+  canvas.getContext("2d").drawImage(image,sx,sy,sw,sh,0,0,sw,sh);
 }
 function bindQuestionCropEditor(editor) {
   if(editor.dataset.bound==="true")return;
   editor.dataset.bound="true";
   const stage=editor.querySelector(".question-crop-stage"),image=editor.querySelector(".question-crop-source"),selection=editor.querySelector(".question-crop-selection");
-  let start=null,origin=null,moveExisting=false;
+  let start=null,origin=null,moveExisting=false,previewFrame=0;
   const point=event=>{
     const bounds=image.getBoundingClientRect();
     return {x:Math.max(0,Math.min(1,(event.clientX-bounds.left)/Math.max(1,bounds.width))),y:Math.max(0,Math.min(1,(event.clientY-bounds.top)/Math.max(1,bounds.height)))};
@@ -1525,8 +1576,12 @@ function bindQuestionCropEditor(editor) {
     else rect={x:Math.min(start.x,end.x),y:Math.min(start.y,end.y),width:Math.abs(end.x-start.x),height:Math.abs(end.y-start.y)};
     editor.dataset.cropRect=JSON.stringify(rect);
     drawQuestionCropSelection(selection,rect);
+    if(!previewFrame)previewFrame=requestAnimationFrame(()=>{
+      previewFrame=0;
+      try { drawQuestionCropPreview(editor,JSON.parse(editor.dataset.cropRect||"null")); } catch {}
+    });
   };
-  const finish=event=>{if(start){if(stage.hasPointerCapture(event.pointerId))stage.releasePointerCapture(event.pointerId);start=null;origin=null;moveExisting=false;}};
+  const finish=event=>{if(start){if(stage.hasPointerCapture(event.pointerId))stage.releasePointerCapture(event.pointerId);try { drawQuestionCropPreview(editor,JSON.parse(editor.dataset.cropRect||"null")); } catch {}start=null;origin=null;moveExisting=false;}};
   stage.onpointerup=finish;stage.onpointercancel=finish;
 }
 function normalizeQuestionKey(value,section) {
@@ -2167,10 +2222,19 @@ async function saveQuestionSet(set) {
     id:set.id,title:set.title,filename:set.filename,type:set.type,questionCount:set.questionCount,
     sections:set.sections,teacherId:session.id,status:"uploading",hiddenFromStudents:false,createdAt:new Date().toISOString()
   };
-  const storedQuestionIds=[];
+  const storedQuestionIds=[],storedSourcePageIds=[];
   try {
     uploadStep="tạo bộ đề trong Firestore";
     await firebaseRequest(fs.setDoc(setRef,metadata));
+    for(const [pageNumber,originalImage] of Object.entries(set.sourcePages||{})) {
+      uploadStep=`nén ảnh trang ${pageNumber} để giáo viên có thể căn lại câu sau khi lưu`;
+      const image=await compressInlineImage(originalImage,700*1024);
+      const sourcePage={page:Number(pageNumber),image,teacherId:session.id};
+      if(new Blob([JSON.stringify(sourcePage)]).size>900*1024)throw new Error(`Ảnh trang ${pageNumber} quá lớn để lưu làm bản gốc. Hãy giảm độ phân giải PDF rồi tải lại.`);
+      uploadStep=`lưu ảnh trang gốc ${pageNumber}`;
+      await firebaseRequest(fs.setDoc(fs.doc(setRef,"sourcePages",String(pageNumber)),sourcePage));
+      storedSourcePageIds.push(String(pageNumber));
+    }
     const questions=[];
     for(const [questionIndex,original] of set.questions.entries()) {
       const question={...original,setId:set.id};
@@ -2196,9 +2260,11 @@ async function saveQuestionSet(set) {
     }
     uploadStep="công bố bộ đề cho học sinh";
     await firebaseRequest(fs.updateDoc(setRef,{status:"published"}));
-    return {...set,...metadata,status:"published",questions};
+    const {sourcePages:discardedSourcePages,...savedSet}=set;
+    return {...savedSet,...metadata,status:"published",questions};
   } catch(error) {
     await Promise.allSettled(storedQuestionIds.map(questionId=>fs.deleteDoc(fs.doc(setRef,"questions",questionId))));
+    await Promise.allSettled(storedSourcePageIds.map(pageId=>fs.deleteDoc(fs.doc(setRef,"sourcePages",pageId))));
     await fs.deleteDoc(setRef).catch(()=>{});
     error.message=`${uploadStep}: ${error.message}`;
     throw error;
@@ -2209,9 +2275,11 @@ async function deleteFirebaseQuestionSet(set) {
   const fs=firebaseSdk;
   const setRef=fs.doc(firebaseDb,"questionSets",set.id);
   const questions=await firebaseRequest(fs.getDocs(fs.collection(setRef,"questions")));
-  for(let index=0;index<questions.docs.length;index+=500) {
+  const sourcePages=await firebaseRequest(fs.getDocs(fs.collection(setRef,"sourcePages")));
+  const childRefs=[...questions.docs,...sourcePages.docs].map(document=>document.ref);
+  for(let index=0;index<childRefs.length;index+=500) {
     const batch=fs.writeBatch(firebaseDb);
-    questions.docs.slice(index,index+500).forEach(question=>batch.delete(question.ref));
+    childRefs.slice(index,index+500).forEach(ref=>batch.delete(ref));
     await firebaseRequest(batch.commit());
   }
   await firebaseRequest(fs.deleteDoc(setRef));
@@ -2242,10 +2310,10 @@ async function saveUploadedDoc(errorsOnly) {
     }
     const questions=pendingUpload.parsed.questions.map(question=>{
       const stored={...question,html:question.sourceImageRects?.length?questionSourceImageHtml(question):question.html};
-      delete stored.sourceImageRects;delete stored.sourceImageCrops;
+      delete stored.sourceImageCrops;
       return stored;
     });
-    let set={id:`set-${Date.now()}`,title:name,filename:pendingUpload.file.name,type:document.querySelector("#doc-topic").value,questionCount:questions.length,sections:[...new Set(questions.map(q=>q.section))],questions};
+    let set={id:`set-${Date.now()}`,title:name,filename:pendingUpload.file.name,type:document.querySelector("#doc-topic").value,questionCount:questions.length,sections:[...new Set(questions.map(q=>q.section))],questions,sourcePages:session?.source==="firebase"?pendingUpload.parsed.sourcePages||{}:{}};
     if(session?.source==="firebase")set=await saveQuestionSet(set);
     data.sets.push(set);data.questions.push(...set.questions.map(q=>({...q,setId:set.id})));
   }
@@ -2259,8 +2327,8 @@ async function saveUploadedDoc(errorsOnly) {
 }
 function summarizeErrors(text) {
   const normalized=normalizeVietnamese(text);
-  const matches=errors.filter(([code,name])=>new RegExp(`(?:^|[^a-z])${code.toLowerCase()}(?:$|[^a-z])`).test(normalized)||normalized.includes(normalizeVietnamese(name)));
-  return matches.length?`Tài liệu có nhắc đến: ${matches.map(([code,name])=>`${code} · ${name}`).join("; ")}. Đây là gợi ý theo chữ xuất hiện, không tự thay đổi nội dung mã lỗi.`:"Đã trích xuất văn bản. Chưa thấy tên hoặc mã KT, TT, PP, DG, SU, QT, MH; hãy rà lại nội dung đã trích xuất.";
+  const matches=errors.filter(([code,name])=>new RegExp(`(?:^|[^a-z])${normalizeVietnamese(code)}(?:$|[^a-z])`).test(normalized)||normalized.includes(normalizeVietnamese(name)));
+  return matches.length?`Tài liệu có nhắc đến: ${matches.map(([code,name])=>`${code} · ${name}`).join("; ")}. Đây là gợi ý theo chữ xuất hiện, không tự thay đổi nội dung mã lỗi.`:`Đã trích xuất văn bản. Chưa thấy tên hoặc mã ${errors.map(category=>category[0]).join(", ")}; hãy rà lại nội dung đã trích xuất.`;
 }
 function showSetModal(set) {
   if(!set)return;
@@ -2276,19 +2344,102 @@ function showSetModal(set) {
     void typesetMath(document.querySelector(".modal"));
     return;
   }
-  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<div class="review-workspace set-review-workspace"><aside class="review-sidebar">${summary}<p class="notice">Phần thi và mã lỗi là gợi ý ban đầu. Thay đổi được lưu tự động.</p></aside><section class="review-main"><div id="doc-preview"><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung và phương án được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><div class="review-question-actions"><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small><button type="button" class="text-button danger-text" data-action="delete-question" data-id="${safe(q.id)}" data-set-id="${safe(set.id)}">Xóa câu</button></div></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${safe(q.id)}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div></div></section></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+  const questionRows=qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung và phương án được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,180))}${q.content.length>180?"…":""}`}</span><div class="review-question-actions"><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình":"Không có hình"}</small><button type="button" class="text-button danger-text" data-action="delete-question" data-id="${safe(q.id)}" data-set-id="${safe(set.id)}">Xóa câu</button></div></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${safe(q.id)}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(section=>`<option ${q.section===section?"selected":""}>${section}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${safe(q.id)}"><option value="">Mã lỗi…</option>${errors.map((category,index)=>`<option value="${safe(category[0])}" ${errorCategoryCodes(category).includes(String(q.errorId||"").toLocaleUpperCase("vi"))?"selected":""}>${safe(category[0])}</option>`).join("")}</select><details class="review-detail"><summary>Xem và sửa nội dung, đáp án, ảnh</summary>${q.sourceImageOnly?renderSavedQuestionImageReview(q,set):`<div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div>`}<label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${safe(q.id)}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/><span>Nhập đáp án mới rồi bấm Tab hoặc nhấp ra ngoài để lưu.</span></label></details></article>`).join("");
+  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<div class="review-workspace set-review-workspace"><aside class="review-sidebar">${summary}<p class="notice">Phần thi, mã lỗi, ảnh câu hỏi và đáp án có thể chỉnh tại đây; thay đổi được lưu tự động. Xóa câu sẽ hỏi xác nhận.</p></aside><section class="review-main"><div id="doc-preview"><div class="question-preview review-list">${questionRows}</div></div></section></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
   document.querySelector(".modal")?.classList.add("modal-review");
   void typesetMath(document.querySelector(".modal"));
   document.querySelectorAll('.modal-backdrop [data-action="delete-question"]').forEach(button=>button.onclick=()=>{void handleAction(button);});
+  document.querySelectorAll(".saved-question-crop-open").forEach(button=>button.onclick=()=>{void openSavedQuestionCrop(button,set);});
+  document.querySelectorAll(".saved-question-crop-save").forEach(button=>button.onclick=()=>{void saveSavedQuestionCrop(button,set);});
+  document.querySelectorAll(".question-crop-move").forEach(button=>button.onclick=()=>{
+    const editor=button.closest(".question-crop-editor");
+    editor.dataset.mode=editor.dataset.mode==="move"?"draw":"move";
+    button.textContent=editor.dataset.mode==="move"?"Vẽ khung mới":"Dời khung";
+    editor.querySelector(".question-crop-stage").classList.toggle("is-moving",editor.dataset.mode==="move");
+  });
+  document.querySelectorAll(".question-crop-cancel").forEach(button=>button.onclick=()=>{button.closest(".question-crop-editor").hidden=true;});
   document.querySelectorAll(".question-error").forEach(el=>el.onchange=()=>updateQuestion(set.id,el.dataset.questionId,{errorId:el.value||null}));
-  document.querySelectorAll(".question-key").forEach(el=>el.onchange=()=>{
+  document.querySelectorAll(".question-key").forEach(el=>el.onchange=async()=>{
     const question=set.questions.find(item=>item.id===el.dataset.questionId);
-    if(question)updateQuestion(set.id,el.dataset.questionId,{answerKey:normalizeQuestionKey(el.value,question.section)});
+    if(question){
+      const answerKey=normalizeQuestionKey(el.value,question.section);
+      if(await updateQuestion(set.id,el.dataset.questionId,{answerKey})){el.value=answerKey||"";toast(`Đã lưu đáp án câu ${set.questions.findIndex(item=>item.id===question.id)+1}.`);}
+    }
   });
   document.querySelectorAll(".question-section").forEach(el=>el.onchange=()=>{
     const question=set.questions.find(item=>item.id===el.dataset.questionId);
     if(question)updateQuestion(set.id,el.dataset.questionId,{section:el.value,answerKey:normalizeQuestionKey(question.answerKey,el.value)});
   });
+}
+async function openSavedQuestionCrop(button,set) {
+  const question=set.questions.find(item=>item.id===button.dataset.questionId),partIndex=Number(button.dataset.partIndex);
+  const editor=button.parentElement.querySelector(".saved-question-crop-editor");
+  const rect=question?.sourceImageRects?.[partIndex];
+  if(!question||!editor)return;
+  button.disabled=true;
+  const originalLabel=button.textContent;
+  button.textContent="Đang mở ảnh…";
+  try {
+    let sourceImage="",sourceMode="saved-crop",cropRect={x:0,y:0,width:1,height:1};
+    if(rect?.page!==null&&rect?.page!==undefined&&Number.isFinite(Number(rect.page))&&session?.source==="firebase") {
+      await configureFirestore();
+      const pageRef=firebaseSdk.doc(firebaseDb,"questionSets",set.id,"sourcePages",String(rect.page));
+      const snapshot=await firebaseRequest(firebaseSdk.getDoc(pageRef));
+      if(snapshot.exists()&&typeof snapshot.data().image==="string") {
+        sourceImage=snapshot.data().image;sourceMode="page";cropRect={...rect};
+      }
+    }
+    if(!sourceImage) {
+      const parsed=new DOMParser().parseFromString(question.html||"","text/html");
+      sourceImage=parsed.body.querySelectorAll("img")[partIndex]?.src||"";
+      if(!sourceImage)throw new Error("Không tìm thấy ảnh câu hỏi để căn chỉnh.");
+      editor.querySelector("[data-saved-crop-help]").textContent="Bộ đề cũ chỉ còn ảnh đã cắt. Bạn có thể căn lại trong phần ảnh hiện có; vùng ngoài ảnh cũ không thể khôi phục.";
+    } else editor.querySelector("[data-saved-crop-help]").textContent="Kéo để chọn lại toàn bộ câu và các phương án. Khung xem trước sẽ khớp chính xác vùng ảnh được lưu.";
+    editor.dataset.sourceMode=sourceMode;
+    editor.dataset.cropRect=JSON.stringify(cropRect);
+    editor.dataset.mode="draw";
+    const moveButton=editor.querySelector(".question-crop-move");
+    moveButton.textContent="Dời khung";
+    editor.querySelector(".question-crop-stage").classList.remove("is-moving");
+    const image=editor.querySelector(".question-crop-source");
+    const draw=()=>{drawQuestionCropSelection(editor.querySelector(".question-crop-selection"),cropRect);drawQuestionCropPreview(editor,cropRect);};
+    image.onload=draw;
+    image.src=sourceImage;
+    editor.hidden=false;
+    if(image.complete&&image.naturalWidth)draw();
+    bindQuestionCropEditor(editor);
+    button.textContent=originalLabel;
+  } catch(error) {
+    toast(`Không mở được ảnh để căn chỉnh: ${firebaseFirestoreError(error)}`);
+    button.textContent=originalLabel;
+  } finally { button.disabled=false; }
+}
+async function saveSavedQuestionCrop(button,set) {
+  const editor=button.closest(".question-crop-editor"),question=set.questions.find(item=>item.id===editor?.dataset.questionId);
+  if(!editor||!question)return;
+  const partIndex=Number(editor.dataset.partIndex),image=editor.querySelector(".question-crop-source");
+  let rect=null;
+  try { rect=JSON.parse(editor.dataset.cropRect||"null"); } catch {}
+  if(!rect||rect.width<.01||rect.height<.01||!image.naturalWidth){toast("Kéo để khoanh trọn câu hỏi và các phương án.");return;}
+  const {sx,sy,sw,sh}=questionCropPixels(image,rect);
+  const canvas=document.createElement("canvas");canvas.width=sw;canvas.height=sh;
+  canvas.getContext("2d").drawImage(image,sx,sy,sw,sh,0,0,sw,sh);
+  const crop=await compressInlineImage(canvas.toDataURL("image/webp",.92));
+  const documentHtml=new DOMParser().parseFromString(question.html||"","text/html"),questionImages=[...documentHtml.body.querySelectorAll("img")];
+  if(!questionImages[partIndex]){toast("Không tìm thấy ảnh cần cập nhật trong câu hỏi.");return;}
+  questionImages[partIndex].src=crop;
+  const sourceImageRects=[...(question.sourceImageRects||[])];
+  sourceImageRects[partIndex]=editor.dataset.sourceMode==="page"?{...rect,page:Number(rect.page)}:{x:0,y:0,width:1,height:1,page:null};
+  button.disabled=true;
+  const label=button.textContent;button.textContent="Đang lưu ảnh…";
+  try {
+    const saved=await updateQuestion(set.id,question.id,{html:documentHtml.body.innerHTML,sourceImageRects,hasImages:true,sourceImageOnly:true});
+    if(!saved)return;
+    const imagePreview=button.closest(".review-detail")?.querySelector(".saved-question-image-content");
+    if(imagePreview)imagePreview.innerHTML=question.html;
+    editor.hidden=true;
+    toast("Đã lưu ảnh câu hỏi đã căn chỉnh.");
+  } finally { if(button.isConnected){button.disabled=false;button.textContent=label;} }
 }
 async function deleteQuestionFromSet(setId,questionId) {
   if(!isTeacher()){toast("Chỉ giáo viên mới được xóa câu hỏi khỏi bộ đề.");return false;}
@@ -2331,24 +2482,37 @@ async function deleteQuestionFromSet(setId,questionId) {
 }
 async function updateQuestion(setId,questionId,changes) {
   const set=data.sets.find(item=>item.id===setId);
-  const update=list=>{const q=list.find(item=>item.id===questionId);if(q)Object.assign(q,changes);};
-  if(set)update(set.questions||[]);
-  update(data.questions);
-  if(!saveData())return;
-  const question=data.questions.find(item=>item.id===questionId);
-  if(session?.source==="firebase"&&set&&question) {
+  const question=set?.questions?.find(item=>item.id===questionId);
+  if(!set||!question)return false;
+  const updated={...question,...changes,setId};
+  if(typeof updated.html==="string") {
+    const parsed=new DOMParser().parseFromString(updated.html,"text/html");
+    for(const image of parsed.querySelectorAll("img"))if(/^data:image\/(?:png|jpeg|webp);base64,/i.test(image.src))image.src=await compressInlineImage(image.src);
+    updated.html=parsed.body.innerHTML;
+  }
+  if(new Blob([JSON.stringify(updated)]).size>850*1024) {
+    toast("Câu hỏi quá lớn để lưu an toàn trong Firestore. Hãy giảm kích thước ảnh rồi thử lại.");
+    return false;
+  }
+  if(session?.source==="firebase") {
     try {
       await configureFirestore();
       await firebaseRequest(firebaseSdk.setDoc(
         firebaseSdk.doc(firebaseDb,"questionSets",setId,"questions",questionId),
-        question,
+        updated,
         {merge:true}
       ));
     } catch(error) {
       console.error("Could not update Firebase question metadata.",error);
-      toast(`Không đồng bộ được phân loại câu hỏi: ${firebaseFirestoreError(error)}`);
+      toast(`Không thể lưu thay đổi câu hỏi: ${firebaseFirestoreError(error)}`);
+      return false;
     }
   }
+  Object.assign(question,updated);
+  const bankQuestion=data.questions.find(item=>item.id===questionId&&item.setId===setId);
+  if(bankQuestion)Object.assign(bankQuestion,updated);
+  saveData();
+  return true;
 }
 function showStudentModal() {
   showModal("Hướng dẫn học sinh đăng ký",`<p class="subhead">Học sinh cần tự tạo tài khoản để liên kết an toàn với Firebase Authentication.</p><ol style="font-size:11px;line-height:1.9;color:#68748a;padding-left:20px"><li>Mở website Toán học và chọn vai trò <b>Học sinh</b>.</li><li>Nhập email, mật khẩu rồi chọn <b>Tạo tài khoản học sinh</b>.</li><li>Sau khi đăng ký, tài khoản sẽ tự xuất hiện trong danh sách này.</li></ol><p class="notice">Không nhập hoặc lưu mật khẩu của học sinh thay các em.</p>`,`<button class="btn" data-action="close-modal">Đã hiểu</button>`);
@@ -2356,11 +2520,11 @@ function showStudentModal() {
 function showExamModal(personal,studentId=null,selectedSetIds=[],selectedErrorIds=[]) {
   const sets=data.sets||[];
   const activeStudents=data.users.filter(user=>user.role==="student"&&!(["disabled","pendingDeletion","deleting"].includes(user.accountStatus)));
-  const initialErrors=errors.map((e,i)=>({code:e[0],count:userStats(session).counts[i]})).sort((a,b)=>b.count-a.count).slice(0,3).map(e=>e.code);
+  const initialErrors=errors.map((e,index)=>({index,count:userStats(session).counts[index]})).sort((a,b)=>b.count-a.count).slice(0,3).map(e=>String(e.index));
   const checkedErrors=selectedErrorIds.length?selectedErrorIds:initialErrors;
   if(!sets.length){toast("Bạn cần tải ít nhất một file .docx vào Kho câu hỏi trước.");if(isTeacher()){currentPage="library";render();}return;}
   showModal(personal?"Tạo đề tự luyện":"Tạo đề ôn tập mới",
-    `<div class="form-grid"><div class="field full"><label>Tên đề</label><input id="exam-title" value="${personal?"Đề tự luyện của "+safe(userName()):"Đề ôn tập mới"}"/></div><div class="field"><label>Số câu</label><select id="exam-count">${[10,20,30,40].map(x=>`<option>${x}</option>`).join("")}</select></div><div class="field"><label>Hạn hoàn thành</label><input id="exam-due" type="date"/></div><div class="field full"><label>Chọn bộ đề làm nguồn (có thể chọn nhiều)</label><div class="assignment-list">${sets.map(s=>`<label class="assignment"><input class="exam-set-check" type="checkbox" value="${safe(s.id)}" ${selectedSetIds.length?selectedSetIds.includes(s.id)?"checked":"": "checked"}/><div class="assignment-details"><strong>${safe(s.title)}</strong><span>${s.questionCount} câu · ${safe(s.filename)}</span></div></label>`).join("")}</div></div>${!personal?`<div class="field full"><label>Giao đề cho học sinh</label>${activeStudents.length?`<div class="assignment-list">${activeStudents.map(user=>`<label class="assignment"><input class="exam-student-check" type="checkbox" value="${safe(user.id)}" ${studentId?studentId===user.id?"checked":"disabled":"checked"}/><div class="assignment-details"><strong>${safe(user.name)}</strong><span>${safe(user.email)}</span></div>${studentId===user.id?'<span class="priority">Giao đề ưu tiên</span>':""}</label>`).join("")}</div>`:`<p class="notice">Chưa có học sinh Firebase hoạt động. Tải lại danh sách học sinh rồi thử lại.</p>`}</div>`:""}${personal?`<div class="field full"><label>Ưu tiên nhóm lỗi</label><div class="assignment-list">${errors.map((e,i)=>`<label class="assignment"><input class="exam-error-check" type="checkbox" value="${e[0]}" ${checkedErrors.includes(e[0])?"checked":""}/><div class="assignment-details"><strong>${e[0]} · ${e[1]}</strong><span>${e[2]}</span></div>${checkedErrors.includes(e[0])?'<span class="priority">Ưu tiên</span>':""}</label>`).join("")}</div></div>`:""}<div class="field full"><label>Cơ cấu đề THPT</label><p class="subhead" style="margin:0">Trắc nghiệm · Đúng / Sai · Trả lời ngắn (lấy theo phân loại câu đã tải)</p></div></div><p class="notice">Câu hỏi được trộn ngẫu nhiên, cân bằng theo phần đề và mã lỗi khi dữ liệu nguồn đã được phân loại. Đề giáo viên được đồng bộ qua Firebase đến các tài khoản đã chọn.</p>`,
+    `<div class="form-grid"><div class="field full"><label>Tên đề</label><input id="exam-title" value="${personal?"Đề tự luyện của "+safe(userName()):"Đề ôn tập mới"}"/></div><div class="field"><label>Số câu</label><select id="exam-count">${[10,20,30,40].map(x=>`<option>${x}</option>`).join("")}</select></div><div class="field"><label>Hạn hoàn thành</label><input id="exam-due" type="date"/></div><div class="field full"><label>Chọn bộ đề làm nguồn (có thể chọn nhiều)</label><div class="assignment-list">${sets.map(s=>`<label class="assignment"><input class="exam-set-check" type="checkbox" value="${safe(s.id)}" ${selectedSetIds.length?selectedSetIds.includes(s.id)?"checked":"": "checked"}/><div class="assignment-details"><strong>${safe(s.title)}</strong><span>${s.questionCount} câu · ${safe(s.filename)}</span></div></label>`).join("")}</div></div>${!personal?`<div class="field full"><label>Giao đề cho học sinh</label>${activeStudents.length?`<div class="assignment-list">${activeStudents.map(user=>`<label class="assignment"><input class="exam-student-check" type="checkbox" value="${safe(user.id)}" ${studentId?studentId===user.id?"checked":"disabled":"checked"}/><div class="assignment-details"><strong>${safe(user.name)}</strong><span>${safe(user.email)}</span></div>${studentId===user.id?'<span class="priority">Giao đề ưu tiên</span>':""}</label>`).join("")}</div>`:`<p class="notice">Chưa có học sinh Firebase hoạt động. Tải lại danh sách học sinh rồi thử lại.</p>`}</div>`:""}${personal?`<div class="field full"><label>Ưu tiên nhóm lỗi</label><div class="assignment-list">${errors.map((e,index)=>`<label class="assignment"><input class="exam-error-check" type="checkbox" value="${index}" ${checkedErrors.includes(String(index))?"checked":""}/><div class="assignment-details"><strong>Nhóm ${index+1} · ${e[0]} · ${e[1]}</strong><span>${e[2]}</span></div>${checkedErrors.includes(String(index))?'<span class="priority">Ưu tiên</span>':""}</label>`).join("")}</div></div>`:""}<div class="field full"><label>Cơ cấu đề THPT</label><p class="subhead" style="margin:0">Trắc nghiệm · Đúng / Sai · Trả lời ngắn (lấy theo phân loại câu đã tải)</p></div></div><p class="notice">Câu hỏi được trộn ngẫu nhiên, cân bằng theo phần đề và mã lỗi khi dữ liệu nguồn đã được phân loại. Đề giáo viên được đồng bộ qua Firebase đến các tài khoản đã chọn.</p>`,
     `<button class="btn secondary" data-action="close-modal">Hủy</button><button class="btn" id="save-exam">${personal?"Tạo đề và bắt đầu":"Tạo đề"}</button>`);
   document.querySelector("#save-exam").onclick=async()=>{
     const saveButton=document.querySelector("#save-exam");
@@ -2368,8 +2532,8 @@ function showExamModal(personal,studentId=null,selectedSetIds=[],selectedErrorId
     const setIds=[...document.querySelectorAll(".exam-set-check:checked")].map(x=>x.value);
     let pool=data.questions.filter(q=>setIds.includes(q.setId));
     if(personal) {
-      const errorIds=[...document.querySelectorAll(".exam-error-check:checked")].map(x=>x.value);
-      const targeted=pool.filter(q=>errorIds.includes(q.errorId));
+      const errorIds=[...document.querySelectorAll(".exam-error-check:checked")].map(x=>Number(x.value));
+      const targeted=pool.filter(q=>errorIds.includes(errorIndexForCode(q.errorId)));
       if(targeted.length)pool=targeted;
       else if(errorIds.length)toast("Nguồn đã chọn chưa có câu hỏi mang mã lỗi này; đề lấy từ toàn bộ bộ đề.");
     }
@@ -2426,10 +2590,12 @@ function selectBalancedQuestions(pool,count) {
       if(selected.length>=count)break;
       const sectionChoices=remaining.filter(q=>q.section===section);
       if(!sectionChoices.length)continue;
-      const codeOrder=errors.map(e=>e[0]).sort((a,b)=>
-        selected.filter(q=>q.errorId===a).length-selected.filter(q=>q.errorId===b).length);
-      const candidate=sectionChoices.find(q=>q.errorId&&codeOrder.indexOf(q.errorId)>=0&&
-        selected.filter(item=>item.errorId===q.errorId).length===Math.min(...codeOrder.map(code=>selected.filter(item=>item.errorId===code).length)));
+      const codeOrder=errors.map((_,index)=>index).sort((a,b)=>
+        selected.filter(q=>questionMatchesErrorIndex(q,a)).length-selected.filter(q=>questionMatchesErrorIndex(q,b)).length);
+      const candidate=sectionChoices.find(q=>{
+        const index=errorIndexForCode(q.errorId);
+        return index>=0&&codeOrder.includes(index)&&selected.filter(item=>errorIndexForCode(item.errorId)===index).length===Math.min(...codeOrder.map(codeIndex=>selected.filter(item=>questionMatchesErrorIndex(item,codeIndex)).length));
+      });
       const chosen=candidate||sectionChoices[0];
       remaining.splice(remaining.indexOf(chosen),1);
       selected.push(chosen);
@@ -2447,7 +2613,8 @@ function renderPractice() {
   practiceReturnPage=currentPage;
   const q=currentPractice.questions[currentQuestionIndex];if(!q){finishExam();return;}
   const root=document.querySelector("#app");
-  root.innerHTML=`<main class="main" style="max-width:920px;margin:auto;padding-top:24px"><div class="topbar"><button class="btn secondary" data-action="finish-exam">← Thoát đề</button><div style="font-size:10px;color:#919bad">Câu ${currentQuestionIndex+1} / ${currentPractice.questions.length} <span id="timer"></span></div></div><div class="eyebrow">${safe(q.section)} · ${currentPractice.source==="personal"?"TỰ LUYỆN":"ĐỀ ĐƯỢC GIAO"}</div><h1 style="font-size:21px">${safe(currentPractice.title)}</h1><section class="card section-card" style="margin-top:18px"><div class="doc-html">${q.html||safe(q.content)}</div>${questionForm(q)}<div style="display:flex;justify-content:space-between;margin-top:20px"><span class="subhead">Nhóm lỗi: ${safe(errors.find(e=>e[0]===q.errorId)?.[1]||"Chưa phân loại")}</span><button class="btn" data-action="${currentQuestionIndex===currentPractice.questions.length-1?"submit-practice":"next-question"}">${currentQuestionIndex===currentPractice.questions.length-1?"Nộp bài":"Câu tiếp theo →"}</button></div></section><div class="notice">Thời gian trả lời mỗi câu được ghi nhận để giúp bạn theo dõi tốc độ làm bài.</div></main>`;
+  const errorIndex=errorIndexForCode(q.errorId);
+  root.innerHTML=`<main class="main" style="max-width:920px;margin:auto;padding-top:24px"><div class="topbar"><button class="btn secondary" data-action="finish-exam">← Thoát đề</button><div style="font-size:10px;color:#919bad">Câu ${currentQuestionIndex+1} / ${currentPractice.questions.length} <span id="timer"></span></div></div><div class="eyebrow">${safe(q.section)} · ${currentPractice.source==="personal"?"TỰ LUYỆN":"ĐỀ ĐƯỢC GIAO"}</div><h1 style="font-size:21px">${safe(currentPractice.title)}</h1><section class="card section-card" style="margin-top:18px"><div class="doc-html">${q.html||safe(q.content)}</div>${questionForm(q)}<div style="display:flex;justify-content:space-between;margin-top:20px"><span class="subhead">Nhóm lỗi: ${safe(errors[errorIndex]?.[1]||"Chưa phân loại")}</span><button class="btn" data-action="${currentQuestionIndex===currentPractice.questions.length-1?"submit-practice":"next-question"}">${currentQuestionIndex===currentPractice.questions.length-1?"Nộp bài":"Câu tiếp theo →"}</button></div></section><div class="notice">Thời gian trả lời mỗi câu được ghi nhận để giúp bạn theo dõi tốc độ trả lời.</div></main>`;
   void typesetMath(root);
   document.querySelectorAll("[data-action]").forEach(b=>b.onclick=()=>handleAction(b));
   document.querySelectorAll(".answer").forEach(el=>el.onchange=()=>{
@@ -2479,7 +2646,7 @@ function finishExam() {
   const total=currentPractice.questions.length;
   const score=graded.length?Math.round((correct/graded.length)*100)/10:null;
   const answeredUnknown=currentPractice.questions.filter(q=>!q.answerKey&&currentPractice.answers[q.id]).length;
-  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map(e=>currentPractice.questions.filter(q=>q.errorId===e[0]&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:currentPractice.questionTimes};
+  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map((_,index)=>currentPractice.questions.filter(q=>questionMatchesErrorIndex(q,index)&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:currentPractice.questionTimes};
   data.attempts.push(attempt);saveData();currentPractice=null;currentPage="progress";render();
   if(session?.source==="firebase")void saveFirebaseAttempt(attempt).catch(error=>{console.error("Could not sync completed attempt.",error);toast("Đã lưu lượt làm trên thiết bị; hệ thống sẽ đồng bộ lại khi có mạng.")});
   showModal("Hoàn thành bài ôn tập",`<div style="text-align:center;padding:12px"><div class="stat-icon purple" style="width:58px;height:58px;border-radius:18px;margin:auto">${icon("spark")}</div><h1 style="font-size:31px;margin-top:14px">${score===null?"Chưa chấm":`${score}/10`}</h1><p class="subhead">${score===null?`Lượt làm đã được ghi nhận. ${total} câu chưa có đáp án để chấm tự động.`:`Bạn trả lời đúng ${correct}/${graded.length} câu đã có đáp án.`} ${answeredUnknown?`${answeredUnknown} câu chưa có đáp án đúng để đối chiếu. `:""}Thời gian: ${formatDuration(attempt.duration)}.</p></div>`,`<button class="btn" data-action="close-modal">Xem lộ trình</button>`);

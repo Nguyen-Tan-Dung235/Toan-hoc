@@ -21,11 +21,15 @@ service cloud.firestore {
           || get(profile).data.accountStatus == "active");
     }
     match /settings/{settingId} {
-      function validCategory(category, code) {
+      function validCategory(category, ordinal) {
         return category is map
-          && category.keys().hasAll(["code", "name", "description"])
-          && category.keys().hasOnly(["code", "name", "description"])
-          && category.code == code
+          && category.keys().hasAll(["ordinal", "code", "name", "description", "legacyCodes"])
+          && category.keys().hasOnly(["ordinal", "code", "name", "description", "legacyCodes"])
+          && category.ordinal == ordinal
+          && category.code is string
+          && category.code.matches("^[A-ZĐÀ-Ỹ]{1,8}$")
+          && category.legacyCodes is list
+          && category.legacyCodes.size() <= 32
           && category.name is string
           && category.name.size() > 0
           && category.name.size() <= 100
@@ -38,13 +42,13 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly(["categories", "updatedAt", "updatedBy"])
           && request.resource.data.categories is list
           && request.resource.data.categories.size() == 7
-          && validCategory(request.resource.data.categories[0], "KT")
-          && validCategory(request.resource.data.categories[1], "TT")
-          && validCategory(request.resource.data.categories[2], "PP")
-          && validCategory(request.resource.data.categories[3], "DG")
-          && validCategory(request.resource.data.categories[4], "SU")
-          && validCategory(request.resource.data.categories[5], "QT")
-          && validCategory(request.resource.data.categories[6], "MH")
+          && validCategory(request.resource.data.categories[0], 1)
+          && validCategory(request.resource.data.categories[1], 2)
+          && validCategory(request.resource.data.categories[2], 3)
+          && validCategory(request.resource.data.categories[3], 4)
+          && validCategory(request.resource.data.categories[4], 5)
+          && validCategory(request.resource.data.categories[5], 6)
+          && validCategory(request.resource.data.categories[6], 7)
           && request.resource.data.updatedAt is string
           && request.resource.data.updatedAt.size() <= 40
           && request.resource.data.updatedBy == request.auth.uid;
@@ -207,6 +211,23 @@ service cloud.firestore {
         allow update: if staff()
           && exists(/databases/$(database)/documents/questionSets/$(setId))
           && questionSet().data.status == "published";
+        allow delete: if staff()
+          && exists(/databases/$(database)/documents/questionSets/$(setId));
+      }
+      match /sourcePages/{pageId} {
+        function questionSet() {
+          return get(/databases/$(database)/documents/questionSets/$(setId));
+        }
+        allow read: if staff() && exists(/databases/$(database)/documents/questionSets/$(setId));
+        allow create: if staff()
+          && exists(/databases/$(database)/documents/questionSets/$(setId))
+          && questionSet().data.teacherId == request.auth.uid
+          && questionSet().data.status == "uploading"
+          && request.resource.data.teacherId == request.auth.uid
+          && request.resource.data.page is int
+          && request.resource.data.image is string
+          && request.resource.data.image.size() <= 1000000;
+        allow update: if false;
         allow delete: if staff()
           && exists(/databases/$(database)/documents/questionSets/$(setId));
       }
