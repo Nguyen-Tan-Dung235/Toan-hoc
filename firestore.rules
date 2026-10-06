@@ -164,6 +164,61 @@ service cloud.firestore {
         && request.resource.data.mistakes.size() == 7
         && request.resource.data.questionTimes is map;
       allow update, delete: if false;
+
+      match /questions/{reviewQuestionId} {
+        function parentAttempt() {
+          return get(/databases/$(database)/documents/attempts/$(attemptId));
+        }
+        allow read: if signedIn()
+          && exists(/databases/$(database)/documents/attempts/$(attemptId))
+          && (staff() || (activeStudent() && parentAttempt().data.userId == request.auth.uid));
+        allow create: if activeStudent()
+          && exists(/databases/$(database)/documents/attempts/$(attemptId))
+          && parentAttempt().data.userId == request.auth.uid
+          && request.resource.data.keys().hasAll([
+            "id", "userId", "ordinal", "questionId", "questionNumber", "section",
+            "errorIndex", "errorName", "content", "html", "sourceImageOnly", "choices",
+            "answerKey", "userAnswer", "isCorrect", "questionTime"
+          ])
+          && request.resource.data.keys().hasOnly([
+            "id", "userId", "ordinal", "questionId", "questionNumber", "section",
+            "errorIndex", "errorName", "content", "html", "sourceImageOnly", "choices",
+            "answerKey", "userAnswer", "isCorrect", "questionTime"
+          ])
+          && request.resource.data.id == reviewQuestionId
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.ordinal is int
+          && request.resource.data.ordinal > 0
+          && request.resource.data.questionId is string
+          && request.resource.data.questionId.size() <= 160
+          && request.resource.data.questionNumber is string
+          && request.resource.data.questionNumber.size() <= 80
+          && request.resource.data.section is string
+          && request.resource.data.section.size() <= 80
+          && request.resource.data.errorIndex is int
+          && request.resource.data.errorIndex >= -1
+          && request.resource.data.errorIndex < 7
+          && request.resource.data.errorName is string
+          && request.resource.data.errorName.size() <= 160
+          && request.resource.data.content is string
+          && request.resource.data.content.size() <= 50000
+          && request.resource.data.html is string
+          && request.resource.data.html.size() <= 980000
+          && request.resource.data.sourceImageOnly is bool
+          && request.resource.data.choices is list
+          && request.resource.data.choices.size() <= 8
+          && (request.resource.data.answerKey == null || request.resource.data.answerKey is string)
+          && (request.resource.data.userAnswer == null
+            || request.resource.data.userAnswer is string
+            || request.resource.data.userAnswer is map
+            || request.resource.data.userAnswer is list
+            || request.resource.data.userAnswer is number
+            || request.resource.data.userAnswer is bool)
+          && (request.resource.data.isCorrect == null || request.resource.data.isCorrect is bool)
+          && request.resource.data.questionTime is int
+          && request.resource.data.questionTime >= 0;
+        allow update, delete: if false;
+      }
     }
     match /questionSets/{setId} {
       allow read: if signedIn() && (

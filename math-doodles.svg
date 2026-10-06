@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="390" viewBox="0 0 520 390" fill="none">
+  <g opacity=".62" stroke="#70b9e7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24 38h108M34 30v16m15-12v8m15-8v8m15-12v16m15-8v8m15-8v8m15-12v16"/>
+    <path d="m210 42 45 74h-90l45-74Z"/><path d="M187 103h46"/>
+    <circle cx="396" cy="54" r="28"/><path d="M396 26v56M368 54h56M376 34l40 40m0-40-40 40"/>
+    <path d="M40 212h72M46 202l58 22m-47-30-7 18m23-12-6 17m23-11-7 18"/>
+    <path d="m235 197 35 20v40l-35 20-35-20v-40l35-20Z"/><path d="M200 217l35 20 35-20m-35 20v40"/>
+    <path d="M352 205c18-23 47-22 60 0 11 19 7 45-12 56-18 10-43 5-53-13-7-13-6-31 5-43Z"/>
+    <path d="M372 231c8 8 17 8 25 0m-23-10h.1m18 0h.1" stroke-width="3"/>
+    <path d="M430 305h58m-52-10v20m13-16v8m13-8v8m13-12v16m13-8v8"/>
+    <path d="m117 305 27-46 27 46h-54Z"/><circle cx="144" cy="290" r="5"/>
+  </g>
+  <g fill="#67aeda" font-family="'Trebuchet MS',sans-serif" font-size="17" font-weight="700" opacity=".7">
+    <text x="286" y="51">x² + y²</text><text x="30" y="158">∫ f(x) dx</text>
+    <text x="304" y="153">π · Δ</text><text x="59" y="354">a² + b² = c²</text>
+    <text x="302" y="350">√(x + 1)</text>
+  </g>
+  <g opacity=".62">
+    <circle cx="474" cy="139" r="5" fill="#ffc96f"/><path d="m170 160 7-10 7 10-7 10-7-10Z" fill="#ff9dc2"/>
+    <circle cx="301" cy="297" r="5" fill="#7bcbb9"/><path d="m25 96 5-8 5 8-5 8-5-8Z" fill="#ffc96f"/>
+    <path d="m466 245 4-7 4 7-4 7-4-7Z" fill="#ff9dc2"/>
+  </g>
+</svg>

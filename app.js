@@ -104,7 +104,7 @@ function loadData() {
 }
 function saveData() {
   const persisted=session?.source==="firebase"
-    ?{...data,users:[],sets:[],questions:[],assignments:[],errorDocs:[]}
+    ?{...data,attempts:data.attempts.map(attempt=>{const {reviewQuestions,...summary}=attempt;return summary;}),users:[],sets:[],questions:[],assignments:[],errorDocs:[]}
     :data;
   try { localStorage.setItem(STORE_KEY, JSON.stringify(persisted)); }
   catch(error) {
@@ -450,6 +450,22 @@ async function saveFirebaseAttempt(attempt,userId=session?.id) {
   const ref=firebaseSdk.doc(firebaseDb,"attempts",payload.id);
   const existing=await firebaseRequest(firebaseSdk.getDoc(ref));
   if(!existing.exists())await firebaseRequest(firebaseSdk.setDoc(ref,payload));
+  const hasInlineReview=existing.exists()&&Array.isArray(existing.data()?.reviewQuestions);
+  if(!hasInlineReview&&Array.isArray(attempt.reviewQuestions)&&attempt.reviewQuestions.length) {
+    const reviewCollection=firebaseSdk.collection(ref,"questions");
+    const saved=await firebaseRequest(firebaseSdk.getDocs(reviewCollection));
+    const savedIds=new Set(saved.docs.map(document=>document.id));
+    const missing=attempt.reviewQuestions.filter(question=>!savedIds.has(String(question.ordinal).padStart(3,"0")));
+    for(let index=0;index<missing.length;index+=8) {
+      const batch=firebaseSdk.writeBatch(firebaseDb);
+      for(const question of missing.slice(index,index+8)) {
+        const review={...question,id:String(question.ordinal).padStart(3,"0"),userId};
+        if(new Blob([JSON.stringify(review)]).size>950*1024)throw new Error(`Phần xem lại câu ${question.ordinal} quá lớn để đồng bộ.`);
+        batch.set(firebaseSdk.doc(reviewCollection,String(question.ordinal).padStart(3,"0")),review);
+      }
+      await firebaseRequest(batch.commit());
+    }
+  }
   return true;
 }
 function sortAttempts(attempts) {
@@ -880,6 +896,48 @@ function donut(counts) {
   let offset=0;const parts=total?counts.map((v,i)=>{const n=v/total*100;const part=`${colors[i]} ${offset}% ${offset+n}%`;offset+=n;return part;}):["#edf0f5 0% 100%"];
   return `<div style="display:flex;align-items:center;gap:17px"><div style="width:124px;height:124px;border-radius:50%;background:conic-gradient(${parts.join(",")});position:relative;flex:none"><div style="position:absolute;inset:23px;background:white;border-radius:50%;display:grid;place-content:center;text-align:center"><b style="font-size:19px">${total}</b><span style="font-size:8px;color:#9aa3b3">lượt sai</span></div></div><div style="display:grid;gap:5px">${errors.map((e,i)=>`<span style="font-size:8px;color:#7f899b"><i style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${colors[i]};margin-right:5px"></i>${e[0]} ${e[1]} <b style="color:#47536a">${counts[i]||0}</b></span>`).join("")}</div></div>`;
 }
+function radarLabelLines(value,maxLength=18) {
+  const lines=[];let line="";
+  for(const word of String(value||"").split(/\s+/)) {
+    if(line&&`${line} ${word}`.length>maxLength){lines.push(line);line=word;}
+    else line=line?`${line} ${word}`:word;
+  }
+  if(line)lines.push(line);
+  return lines;
+}
+function radarPolygon(values,cx,cy,radius,maxValue) {
+  return values.map((value,index)=>{
+    const angle=-Math.PI/2+index*2*Math.PI/values.length,distance=radius*Math.max(0,Math.min(1,(Number(value)||0)/maxValue));
+    return `${cx+Math.cos(angle)*distance},${cy+Math.sin(angle)*distance}`;
+  }).join(" ");
+}
+function personalPracticeEvaluation(attempts) {
+  const personal=sortAttempts((attempts||[]).filter(attempt=>attempt.source==="personal"));
+  const current=personal.at(-1),previous=personal.at(-2);
+  if(!current)return `<section class="card section-card practice-evaluation"><div class="section-heading"><div><h2>Đánh giá 7 nhóm kiến thức</h2><p>Biểu đồ cập nhật sau mỗi đề tự luyện; tên nhóm được ghi đầy đủ.</p></div></div><div class="practice-evaluation-empty"><span class="practice-empty-mark">✦</span><strong>Hoàn thành một đề tự luyện để xem biểu đồ</strong><p>Hệ thống sẽ so sánh số câu sai của đề mới nhất với đề trước đó, không cộng dồn lỗi qua nhiều đề.</p></div></section>`;
+  const values=errors.map((_,index)=>Math.max(0,Math.floor(Number(current.mistakes?.[index])||0)));
+  const previousValues=previous?errors.map((_,index)=>Math.max(0,Math.floor(Number(previous.mistakes?.[index])||0))):null;
+  const maximum=Math.max(4,...values,...(previousValues||[]));
+  const cx=430,cy=250,radius=150,labelRadius=211;
+  const rings=[4,3,2,1].map(level=>`<polygon class="radar-grid-ring" points="${radarPolygon(errors.map(()=>maximum*level/4),cx,cy,radius,maximum)}"/><text class="radar-grid-label" x="${cx+5}" y="${cy-radius*level/4-4}">${Math.round(maximum*level/4)}</text>`).join("");
+  const axes=errors.map((category,index)=>{
+    const angle=-Math.PI/2+index*2*Math.PI/errors.length,x=cx+Math.cos(angle)*radius,y=cy+Math.sin(angle)*radius;
+    const labelX=cx+Math.cos(angle)*labelRadius,labelY=cy+Math.sin(angle)*labelRadius;
+    const anchor=Math.cos(angle)>.32?"start":Math.cos(angle)<-.32?"end":"middle";
+    const lines=radarLabelLines(category[1]),lineStart=labelY-(lines.length-1)*6;
+    return `<line class="radar-axis" x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><text class="radar-axis-label" x="${labelX}" y="${lineStart}" text-anchor="${anchor}">${lines.map((line,lineIndex)=>`<tspan x="${labelX}" dy="${lineIndex?14:0}">${safe(line)}</tspan>`).join("")}</text>`;
+  }).join("");
+  const previousSeries=previousValues?`<polygon class="radar-series radar-series-previous" points="${radarPolygon(previousValues,cx,cy,radius,maximum)}"/>${previousValues.map((value,index)=>{const angle=-Math.PI/2+index*2*Math.PI/errors.length,distance=radius*value/maximum;return `<circle class="radar-point radar-point-previous" cx="${cx+Math.cos(angle)*distance}" cy="${cy+Math.sin(angle)*distance}" r="3.5"/>`;}).join("")}`:"";
+  const currentSeries=`<polygon class="radar-series radar-series-current" points="${radarPolygon(values,cx,cy,radius,maximum)}"/>${values.map((value,index)=>{const angle=-Math.PI/2+index*2*Math.PI/errors.length,distance=radius*value/maximum;return `<circle class="radar-point radar-point-current" cx="${cx+Math.cos(angle)*distance}" cy="${cy+Math.sin(angle)*distance}" r="4.5"/>`;}).join("")}`;
+  const label=current=>`${safe(current.title)} · ${new Date(current.createdAt).toLocaleDateString("vi-VN")}`;
+  const changes=errors.map((category,index)=>{
+    const delta=previousValues?values[index]-previousValues[index]:null;
+    const status=delta===null?"first":delta>0?"up":delta<0?"down":"same";
+    const mark=delta===null?"—":delta>0?`↑ +${delta}`:delta<0?`↓ ${delta}`:"→ 0";
+    return `<div class="practice-change-row"><span class="practice-change-name">${safe(category[1])}</span><span class="practice-change-count">${values[index]} câu sai</span><strong class="practice-change-delta ${status}">${mark}</strong></div>`;
+  }).join("");
+  return `<section class="card section-card practice-evaluation"><div class="section-heading"><div><h2>Đánh giá lỗi qua đề tự luyện</h2><p>Số câu sai của đề mới nhất so với đề trước đó · Không cộng dồn.</p></div><span class="practice-analysis-tag">${personal.length} đề đã làm</span></div><div class="practice-evaluation-grid"><div class="practice-radar-wrap"><div class="practice-radar-caption"><strong>${label(current)}</strong><span>${previous?`So với: ${label(previous)}`:"Đây là mốc tự luyện đầu tiên"}</span></div><svg class="practice-radar" viewBox="0 0 860 500" role="img" aria-label="Biểu đồ mạng nhện so sánh số câu sai theo bảy nhóm kiến thức có tên đầy đủ"><title>So sánh số câu sai theo nhóm kiến thức</title>${rings}${axes}${previousSeries}${currentSeries}</svg><div class="practice-radar-legend"><span><i class="radar-legend-dot current"></i>Đề mới nhất</span>${previous?'<span><i class="radar-legend-dot previous"></i>Đề trước đó</span>':""}</div></div><div class="practice-change-panel"><div class="practice-change-heading"><strong>Thay đổi theo nhóm</strong><span>${previous?"So với lần trước":"Mốc ban đầu"}</span></div><div class="practice-change-list">${changes}</div><div class="practice-change-footnote">↑ Tăng số câu sai <span>·</span> ↓ Giảm số câu sai</div></div></div></section>`;
+}
 function teacherHome() {
   const students=data.users.filter(u=>u.role==="student"),allAttempts=sortAttempts(data.attempts),scored=allAttempts.filter(attempt=>Number.isFinite(attempt.score)),average=avg(scored.map(attempt=>attempt.score)),recent=data.assignments.slice(0,3),activities=allAttempts.slice(-3).reverse();
   const dateLabel=new Date().toLocaleDateString("vi-VN",{day:"2-digit",month:"long",year:"numeric"});
@@ -893,15 +951,16 @@ function teacherHome() {
 function aggregateMistakes(users) { return errors.map((_,i)=>users.reduce((n,u)=>n+(userStats(u).counts[i]||0),0)); }
 function studentHome() {
   const stats=userStats(session), avgscore=stats.average;
+  const personalAttempts=sortAttempts(stats.attempts.filter(attempt=>attempt.source==="personal"));
+  const latestPersonalMistakes=personalAttempts.at(-1)?.mistakes||null;
   const completed=stats.attempts.length||stats.scores.length;
   const timeHours=(stats.attempts.reduce((n,a)=>n+a.duration,0)/3600).toFixed(1);
   const days=new Set(stats.attempts.map(a=>new Date(a.createdAt).toLocaleDateString("en-CA"))),streak=days.size;
   const latest=data.assignments.filter(a=>a.state!=="Đã đóng"&&(!a.studentIds||a.studentIds.includes(session.id)));
   return `${welcome(`Chào ${safe(userName())} 👋`,"Hôm nay là một ngày tốt để học thêm điều mới!",`<button class="date-chip">${icon("calendar")} Thứ Hai, 05/10</button>`)}
   <div class="grid stats">${statCard("Điểm trung bình",avgscore,"", "chart","purple","Qua các đề đã chấm")}${statCard("Đề đã hoàn thành",completed,"","book","green","Số lượt làm bài đã ghi nhận")}${statCard("Thời gian học",`${timeHours}h`,"","clock","orange","Tổng thời gian đã làm bài")}${statCard("Ngày có hoạt động",`${streak} ngày`,"","target","blue","Dựa trên lịch sử làm đề")}</div>
-  <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Hành trình tiến bộ</h2><p>Điểm số của bạn qua từng đề ôn tập</p></div><div class="chart-legend"><span><i class="legend-dot"></i>Điểm số</span></div></div>${scoreChart(stats.scores)}</section>
-  <section class="card section-card"><div class="section-heading"><div><h2>Nhóm lỗi thường gặp</h2><p>Chọn đúng chỗ để luyện tập tốt hơn</p></div></div>${donut(stats.counts)}</section></div>
-  <div class="grid bottom-grid"><section class="card section-card"><div class="section-heading"><div><h2>Đề được giao cho bạn</h2><p>Hoàn thành trước hạn để không bỏ lỡ nhé</p></div><button class="text-button" data-page="home">Xem tất cả →</button></div>${assignmentList(latest)}</section><section class="card section-card"><div class="section-heading"><div><h2>Gợi ý dành cho bạn</h2></div></div><div style="padding:9px 2px"><div class="activity"><div class="activity-icon lilac">${icon("spark")}</div><div class="activity-main"><strong>Ưu tiên ôn: ${topError(stats.counts)[1]}</strong><span>Đây là nhóm lỗi bạn gặp nhiều nhất gần đây.</span></div></div><button class="btn" data-page="personal" style="margin:17px 0 0 40px">Tạo đề cá nhân hóa</button></div></section></div>`;
+  ${personalPracticeEvaluation(stats.attempts)}
+  <div class="grid bottom-grid"><section class="card section-card"><div class="section-heading"><div><h2>Đề được giao cho bạn</h2><p>Hoàn thành trước hạn để không bỏ lỡ nhé</p></div><button class="text-button" data-page="home">Xem tất cả →</button></div>${assignmentList(latest)}</section><section class="card section-card"><div class="section-heading"><div><h2>Gợi ý dành cho bạn</h2></div></div><div style="padding:9px 2px"><div class="activity"><div class="activity-icon lilac">${icon("spark")}</div><div class="activity-main"><strong>${latestPersonalMistakes?`Ưu tiên ôn: ${safe(topError(latestPersonalMistakes)[1])}`:"Bắt đầu một đề tự luyện"}</strong><span>${latestPersonalMistakes?"Gợi ý dựa trên đề tự luyện mới nhất.":"Sau khi hoàn thành đề tự luyện, hệ thống sẽ gợi ý nhóm cần ôn theo kết quả mới nhất."}</span></div></div><button class="btn" data-page="personal" style="margin:17px 0 0 40px">Tạo đề cá nhân hóa</button></div></section></div>`;
 }
 function topError(counts) { let idx=counts.indexOf(Math.max(...counts));return errors[idx]||errors[0];}
 function assignmentList(assignments) {
@@ -910,26 +969,71 @@ function assignmentList(assignments) {
 }
 function progressPage(user) {
   const stats=userStats(user);
+  const personalAttempts=sortAttempts(stats.attempts.filter(attempt=>attempt.source==="personal"));
+  const latestMistakes=personalAttempts.at(-1)?.mistakes||[0,0,0,0,0,0,0];
   return `${welcome("Lộ trình cá nhân","Theo dõi điểm số, thời gian và những phần kiến thức bạn đã cải thiện.")}
-  <div class="grid stats">${statCard("Điểm trung bình",stats.average,"","chart","purple","Qua các bài đã chấm")}${statCard("Đề đã hoàn thành",stats.attempts.length||stats.scores.length,"","book","green","Tiến độ học tập")}${statCard("Thời gian trung bình",stats.attempts.length?`${Math.round(stats.attempts.reduce((n,a)=>n+a.duration,0)/stats.attempts.length/60)} phút`:"—","", "clock","orange","Mỗi đề đã làm")}${statCard("Nhóm lỗi cần chú ý",topError(stats.counts)[1],"Ưu tiên","target","blue","Luyện thêm để tiến bộ")}</div>
-  <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Biểu đồ điểm số</h2><p>Điểm theo thứ tự từng lần làm đề</p></div></div>${scoreChart(stats.scores)}</section><section class="card section-card"><div class="section-heading"><div><h2>Phân tích 7 nhóm lỗi</h2><p>Tỷ lệ lỗi được ghi nhận</p></div></div>${donut(stats.counts)}</section></div>
+  <div class="grid stats">${statCard("Điểm trung bình",stats.average,"","chart","purple","Qua các bài đã chấm")}${statCard("Đề đã hoàn thành",stats.attempts.length||stats.scores.length,"","book","green","Tiến độ học tập")}${statCard("Thời gian trung bình",stats.attempts.length?`${Math.round(stats.attempts.reduce((n,a)=>n+a.duration,0)/stats.attempts.length/60)} phút`:"—","", "clock","orange","Mỗi đề đã làm")}${statCard("Nhóm lỗi cần chú ý",topError(latestMistakes)[1],"Đề tự luyện gần nhất","target","blue","Tên nhóm đầy đủ")}</div>
+  ${personalPracticeEvaluation(personalAttempts)}
   <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử luyện tập</h2><p>Thời gian trả lời được ghi nhận trong từng lần làm bài</p></div></div>${attemptTable(stats.attempts)}</div>`;
 }
 function attemptTable(attempts) {
   if(!attempts.length)return `<div class="empty">Các bài luyện tập hoàn thành sẽ xuất hiện tại đây.<br/><br/><button class="btn" data-page="home">Chọn đề ôn tập</button></div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN</th><th>NGÀY LÀM</th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td>${new Date(a.createdAt).toLocaleDateString("vi-VN")}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td>${new Date(a.createdAt).toLocaleDateString("vi-VN")}</td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 function formatDuration(seconds) { return `${Math.floor(seconds/60)} phút ${seconds%60} giây`; }
+function formatAttemptAnswer(value) {
+  if(value===null||value===undefined||value==="")return "Chưa trả lời";
+  if(Array.isArray(value))return value.map(item=>String(item)).join(", ");
+  if(typeof value==="object")return Object.entries(value).sort(([left],[right])=>left.localeCompare(right)).map(([label,answer])=>`${label}. ${answer}`).join(" · ");
+  return String(value).replace(/\|/g," · ").replace(/([A-D]):/g,"$1. ");
+}
+function attemptReviewQuestionMarkup(question,index) {
+  const isCorrect=question.isCorrect===true,isWrong=question.isCorrect===false;
+  const resultClass=isCorrect?"correct":isWrong?"incorrect":"ungraded";
+  const resultLabel=isCorrect?"Đúng":isWrong?"Chưa đúng":"Chưa có đáp án chấm";
+  const errorIndex=Number.isInteger(question.errorIndex)?question.errorIndex:errorIndexForCode(question.errorId);
+  const errorName=errorIndex>=0?errors[errorIndex]?.[1]:question.errorName;
+  return `<article class="attempt-review-question ${resultClass}"><header><div><span class="attempt-question-number">Câu ${safe(question.questionNumber||index+1)}</span><span class="attempt-question-meta">${safe(question.section||"Câu hỏi")}${errorName?` · ${safe(errorName)}`:""}</span></div><span class="attempt-result-pill ${resultClass}">${resultLabel}</span></header><div class="attempt-review-content doc-html">${question.html||safe(question.content||"")}${renderQuestionChoices(question)}</div><div class="attempt-answer-grid"><div><span>Bài làm của bạn</span><strong>${safe(formatAttemptAnswer(question.userAnswer))}</strong></div><div class="attempt-correct-answer"><span>Đáp án đúng</span><strong>${question.answerKey?safe(formatAttemptAnswer(question.answerKey)):"Chưa có đáp án để đối chiếu"}</strong></div></div>${question.questionTime?`<small class="attempt-question-time">Thời gian câu này: ${formatDuration(question.questionTime)}</small>`:""}</article>`;
+}
+async function showAttemptReview(attempt) {
+  if(!attempt)return;
+  let reviewQuestions=Array.isArray(attempt.reviewQuestions)?attempt.reviewQuestions:null;
+  if(!reviewQuestions&&session?.source==="firebase") {
+    try {
+      await configureFirestore();
+      const reviewRef=firebaseSdk.collection(firebaseSdk.doc(firebaseDb,"attempts",attempt.id),"questions");
+      const snapshot=await firebaseRequest(firebaseSdk.getDocs(reviewRef));
+      reviewQuestions=snapshot.docs.map(document=>document.data()).sort((left,right)=>Number(left.ordinal)-Number(right.ordinal));
+      if(reviewQuestions.length)attempt.reviewQuestions=reviewQuestions;
+    } catch(error) {
+      console.error("Could not load a completed attempt for review.",error);
+      toast(`Không tải được câu trả lời để xem lại: ${firebaseFirestoreError(error)}`);
+      return;
+    }
+  }
+  if(!reviewQuestions?.length) {
+    showModal(`Xem lại: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("book")}</div><strong>Lượt làm cũ chưa lưu chi tiết từng câu</strong><p>Hệ thống trước đây chỉ lưu điểm tổng và số câu sai theo nhóm, nên không thể khôi phục câu hỏi hoặc lựa chọn bạn đã trả lời cho lượt này.</p><div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span>Số câu đúng <b>${attempt.correct}/${attempt.graded??attempt.total}</b></span><span>Ngày làm <b>${new Date(attempt.createdAt).toLocaleDateString("vi-VN")}</b></span></div></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+    document.querySelector(".modal")?.classList.add("modal-attempt-review");
+    return;
+  }
+  const correct=reviewQuestions.filter(question=>question.isCorrect===true).length;
+  const incorrect=reviewQuestions.filter(question=>question.isCorrect===false).length;
+  const ungraded=reviewQuestions.length-correct-incorrect;
+  const body=`<div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>${formatDuration(attempt.duration)}</span></div><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
+  showModal(`Xem lại bài: ${safe(attempt.title)}`,body,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+  document.querySelector(".modal")?.classList.add("modal-attempt-review");
+  void typesetMath(document.querySelector(".modal"));
+}
 function comparePage() {
   if(isTeacher()&&selectedStudent) {
     const u=data.users.find(x=>x.id===selectedStudent);if(u)return `${welcome(`Lộ trình của ${safe(u.name)}`,"Phân tích tiến bộ và gợi ý hỗ trợ theo từng nhóm lỗi.",`<button class="btn secondary" data-action="back-students">← Danh sách học sinh</button><button class="btn" data-action="assign-priority" data-id="${u.id}">${icon("plus")} Giao đề ưu tiên</button>`)}${progressPage(u)}`;
   }
   const users=isTeacher()?data.users.filter(u=>u.role==="student"):[session];
   if(!isTeacher()) {
-    const attempts=userStats(session).attempts.filter(attempt=>attempt.source==="personal");
+    const attempts=sortAttempts(userStats(session).attempts.filter(attempt=>attempt.source==="personal"));
     const scores=attempts.map(attempt=>attempt.score).filter(Number.isFinite);
-    const counts=errors.map((error,index)=>attempts.reduce((total,attempt)=>total+(attempt.mistakes?.[index]||0),0));
-    return `${welcome("Tiến bộ qua đề tự luyện","Chỉ thống kê các đề bạn tự tạo; bài giáo viên giao không được tính ở đây.")}<div class="grid stats">${statCard("Đề tự luyện",attempts.length,"","book","purple","Số lượt đã hoàn thành")}${statCard("Điểm gần nhất",scores.length?scores[scores.length-1]:"—","", "chart","green","Trên thang điểm 10")}${statCard("Điểm trung bình",scores.length?avg(scores):"—","","target","orange","Chỉ tính đề tự luyện")}${statCard("Nhóm cần ôn",topError(counts)[0],"","target","blue","Theo số câu sai")}</div><div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Điểm số theo lượt tự luyện</h2><p>Trục ngang là số lần bạn làm đề</p></div></div>${scoreChart(scores)}</section><section class="card section-card"><div class="section-heading"><div><h2>Phân bố 7 nhóm lỗi</h2><p>Tổng lỗi trong các đề tự luyện</p></div></div>${donut(counts)}</section></div><div class="card section-card"><div class="section-heading"><div><h2>Lịch sử đề tự luyện</h2><p>${attempts.length} lượt hoàn thành</p></div></div>${attemptTable(attempts)}</div>`;
+    const latestMistakes=attempts.at(-1)?.mistakes||[0,0,0,0,0,0,0];
+    return `${welcome("Tiến bộ qua đề tự luyện","So sánh từng đề mới với đề ngay trước đó. Số lỗi không bị cộng dồn qua nhiều lượt.")}<div class="grid stats">${statCard("Đề tự luyện",attempts.length,"","book","purple","Số lượt đã hoàn thành")}${statCard("Điểm gần nhất",scores.length?scores[scores.length-1]:"—","", "chart","green","Trên thang điểm 10")}${statCard("Điểm trung bình",scores.length?avg(scores):"—","","target","orange","Chỉ tính đề tự luyện")}${statCard("Nhóm cần ôn",topError(latestMistakes)[1],"","target","blue","Tên nhóm đầy đủ")}</div>${personalPracticeEvaluation(attempts)}<div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử đề tự luyện</h2><p>${attempts.length} lượt hoàn thành · Chọn một đề để xem lại từng câu</p></div></div>${attemptTable(attempts)}</div>`;
   }
   return `${welcome("So sánh tiến bộ học sinh","Xem sự thay đổi kết quả và xác định phần kiến thức cần ưu tiên.")}<div class="card section-card"><div class="section-heading"><div><h2>Danh sách học sinh</h2><p>Chọn một học sinh để xem lộ trình chi tiết.</p></div></div>${studentsTable(users,true)}</div>`;
 }
@@ -988,11 +1092,13 @@ function teacherExamsPage() {
   <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Nguồn câu hỏi</h2><p>Chọn nhiều bộ đề để trộn câu hỏi ngẫu nhiên</p></div><button class="text-button" data-page="library">Mở kho câu hỏi →</button></div>${data.sets.length?`<div class="assignment-list">${data.sets.map(s=>`<div class="assignment"><div class="assignment-mark">${icon("book")}</div><div class="assignment-details"><strong>${safe(s.title)}</strong><span>${s.questionCount} câu · ${safe(s.filename)}</span></div><span class="tag">${safe(s.type||"Toán")}</span></div>`).join("")}</div>`:`<div class="empty">Hãy tải file Word lên kho câu hỏi trước.</div>`}</div>`;
 }
 function personalPage() {
-  const counts=userStats(session).counts, priorities=errors.map((e,i)=>({e,i,n:counts[i]||0})).sort((a,b)=>b.n-a.n);
+  const personalAttempts=sortAttempts(userStats(session).attempts.filter(attempt=>attempt.source==="personal"));
+  const counts=personalAttempts.at(-1)?.mistakes||userStats(session).counts, priorities=errors.map((e,i)=>({e,i,n:counts[i]||0})).sort((a,b)=>b.n-a.n);
   return `${welcome("Ôn tập cá nhân hóa","Chọn bộ đề và những nhóm lỗi bạn muốn tập trung cải thiện.",`<button class="btn" data-action="create-personal">${icon("spark")} Tạo đề cho mình</button>`)}
   <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Chọn nguồn câu hỏi</h2><p>Luyện từ đề giáo viên đã tải lên</p></div></div>${data.sets.length?`<div class="assignment-list">${data.sets.map(s=>`<label class="assignment" style="cursor:pointer"><input class="set-check" type="checkbox" value="${s.id}"/><div class="assignment-mark">${icon("book")}</div><div class="assignment-details"><strong>${safe(s.title)}</strong><span>${s.questionCount} câu · ${safe(s.filename)}</span></div></label>`).join("")}</div>`:`<div class="empty">Chưa có bộ đề trong kho. Giáo viên cần tải đề Word lên trước.</div>`}</section>
-  <section class="card section-card"><div class="section-heading"><div><h2>Chọn nhóm lỗi cần luyện</h2><p>Các nhóm cần ưu tiên được gợi ý từ kết quả gần đây</p></div></div><div class="assignment-list">${priorities.map((x,i)=>`<label class="assignment" style="cursor:pointer"><input class="error-check" type="checkbox" value="${x.i}" ${i<3?"checked":""}/><div class="activity-icon ${i===0?"peach":"lilac"}">${icon("target")}</div><div class="assignment-details"><strong>${x.e[0]} · ${x.e[1]}</strong><span>${x.e[2]}</span></div>${i<3?'<span class="priority">Ưu tiên</span>':""}</label>`).join("")}</div></section></div>
-  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử tự luyện</h2><p>Kết quả đề cá nhân không gộp với bài giáo viên giao</p></div></div>${attemptTable(userStats(session).attempts.filter(a=>a.source==="personal"))}</div>`;
+  <section class="card section-card"><div class="section-heading"><div><h2>Chọn nhóm lỗi cần luyện</h2><p>Ưu tiên theo đề tự luyện gần nhất; hiển thị tên nhóm đầy đủ</p></div></div><div class="assignment-list">${priorities.map((x,i)=>`<label class="assignment" style="cursor:pointer"><input class="error-check" type="checkbox" value="${x.i}" ${i<3?"checked":""}/><div class="activity-icon ${i===0?"peach":"lilac"}">${icon("target")}</div><div class="assignment-details"><strong>${safe(x.e[1])}</strong><span>${x.e[2]}</span></div>${i<3?'<span class="priority">Ưu tiên</span>':""}</label>`).join("")}</div></section></div>
+  ${personalPracticeEvaluation(personalAttempts)}
+  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử tự luyện</h2><p>Kết quả đề cá nhân không gộp với bài giáo viên giao · Bấm xem lại để học lại từng câu</p></div></div>${attemptTable(personalAttempts)}</div>`;
 }
 function bindApp() {
   document.querySelectorAll("[data-page]").forEach(b=>b.onclick=()=>{
@@ -1187,6 +1293,11 @@ async function handleAction(button) {
     const setIds=[...document.querySelectorAll(".set-check:checked")].map(el=>el.value);
     const errorIds=[...document.querySelectorAll(".error-check:checked")].map(el=>String(el.value));
     showExamModal(true,null,setIds,errorIds);return;
+  }
+  if(action==="review-attempt"){
+    const attempt=data.attempts.find(item=>item.id===id);
+    await showAttemptReview(attempt);
+    return;
   }
   if(action==="select-student"){selectedStudent=id;currentPage="compare";render();return;}
   if(action==="back-students"){selectedStudent=null;currentPage="students";render();return;}
@@ -2652,7 +2763,26 @@ function finishExam() {
   const total=currentPractice.questions.length;
   const score=graded.length?Math.round((correct/graded.length)*100)/10:null;
   const answeredUnknown=currentPractice.questions.filter(q=>!q.answerKey&&currentPractice.answers[q.id]).length;
-  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map((_,index)=>currentPractice.questions.filter(q=>questionMatchesErrorIndex(q,index)&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:currentPractice.questionTimes};
+  const reviewQuestions=currentPractice.questions.map((question,index)=>{
+    const answerKey=question.answerKey?String(question.answerKey):null,userAnswer=currentPractice.answers[question.id]??null,errorIndex=errorIndexForCode(question.errorId);
+    return {
+      ordinal:index+1,
+      questionId:String(question.id||`question-${index+1}`).slice(0,160),
+      questionNumber:String(question.questionNumber||question.question_number||index+1).slice(0,80),
+      section:String(question.section||"").slice(0,80),
+      errorIndex,
+      errorName:errorIndex>=0?String(errors[errorIndex]?.[1]||"").slice(0,160):"",
+      content:String(question.content||""),
+      html:String(question.html||safe(question.content||"")),
+      sourceImageOnly:Boolean(question.sourceImageOnly),
+      choices:question.sourceImageOnly?[]:(question.choices||[]).map(choice=>({label:String(choice.label||"").slice(0,8),html:String(choice.html||""),text:String(choice.text||"")})),
+      answerKey,
+      userAnswer,
+      isCorrect:answerKey?normalizeAnswer(userAnswer)===normalizeAnswer(answerKey):null,
+      questionTime:Math.max(0,Math.floor(Number(currentPractice.questionTimes?.[question.id])||0))
+    };
+  });
+  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map((_,index)=>currentPractice.questions.filter(q=>questionMatchesErrorIndex(q,index)&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:{...currentPractice.questionTimes},reviewQuestions};
   data.attempts.push(attempt);saveData();currentPractice=null;currentPage="progress";render();
   if(session?.source==="firebase")void saveFirebaseAttempt(attempt).catch(error=>{console.error("Could not sync completed attempt.",error);toast("Đã lưu lượt làm trên thiết bị; hệ thống sẽ đồng bộ lại khi có mạng.")});
   showModal("Hoàn thành bài ôn tập",`<div style="text-align:center;padding:12px"><div class="stat-icon purple" style="width:58px;height:58px;border-radius:18px;margin:auto">${icon("spark")}</div><h1 style="font-size:31px;margin-top:14px">${score===null?"Chưa chấm":`${score}/10`}</h1><p class="subhead">${score===null?`Lượt làm đã được ghi nhận. ${total} câu chưa có đáp án để chấm tự động.`:`Bạn trả lời đúng ${correct}/${graded.length} câu đã có đáp án.`} ${answeredUnknown?`${answeredUnknown} câu chưa có đáp án đúng để đối chiếu. `:""}Thời gian: ${formatDuration(attempt.duration)}.</p></div>`,`<button class="btn" data-action="close-modal">Xem lộ trình</button>`);
