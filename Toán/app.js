@@ -59,6 +59,7 @@ let firebaseFirestoreSdk = null;
 let firebaseFunctionsSdk = null;
 let firebaseDb = null;
 let firebaseFunctions = null;
+let firebaseStorage = null;
 let questionSetUnsubscribe = null;
 let questionSetSyncGeneration = 0;
 let registeringFirebaseAccount = false;
@@ -88,7 +89,7 @@ function saveData() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(persisted)); }
   catch(error) {
     console.error("Không thể lưu dữ liệu trên trình duyệt.", error);
-    toast("Không đủ dung lượng lưu trên trình duyệt. Hãy giảm dung lượng dữ liệu hoặc ảnh.");
+    toast("Không đủ dung lượng lưu trên trình duyệt. Hãy dùng file nhỏ hơn hoặc triển khai Firebase Storage.");
     return false;
   }
   return true;
@@ -99,10 +100,6 @@ function loadSession() {
 function setSession(user) {
   session = user;
   if(user)loginNotice="";
-  if(user?.source==="firebase"&&user.role==="student") {
-    data.sets=[];
-    data.questions=[];
-  }
   if (user) localStorage.setItem(SESSION_KEY, JSON.stringify(user)); else localStorage.removeItem(SESSION_KEY);
   if(!user&&questionSetUnsubscribe) {
     questionSetUnsubscribe();
@@ -135,6 +132,14 @@ async function configureFirestore() {
     experimentalAutoDetectLongPolling:true
   });
   return firebaseDb;
+}
+async function configureFirebaseStorage() {
+  await configureFirebaseAuth();
+  if(firebaseStorage)return firebaseStorage;
+  const storageSdk=await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js");
+  firebaseSdk={...firebaseSdk,...storageSdk};
+  firebaseStorage=storageSdk.getStorage(firebaseAuth.app);
+  return firebaseStorage;
 }
 async function configureFirebaseFunctions() {
   await configureFirebaseAuth();
@@ -255,7 +260,7 @@ async function loadFirebaseQuestionSets() {
           if(localSet)Object.assign(localSet,migrated);
         } catch(error) {
           console.error("Could not migrate a legacy local question set.",error);
-          toast(`Chưa đồng bộ được bộ đề cũ “${legacySet.title}”: ${firebaseFirestoreError(error)}`);
+          toast(`Chưa đồng bộ được bộ đề cũ “${legacySet.title}”: ${error.code?.startsWith("storage/")?firebaseStorageError(error):firebaseFirestoreError(error)}`);
           break;
         }
       }
@@ -268,8 +273,6 @@ async function loadFirebaseQuestionSets() {
         return {...document.data(),id:document.id,questions:questions.docs.map(question=>({...question.data(),id:question.id}))};
       }));
       if(generation!==questionSetSyncGeneration||session?.id!==userId)return;
-      // A Firebase account must use the shared Firestore bank as its source of truth.
-      // Local-only sets are device-specific and made the library look different across devices.
       data.sets=isTeacher()?remote:remote.filter(set=>!set.hiddenFromStudents);
       data.questions=data.sets.flatMap(set=>(set.questions||[]).map(question=>({...question,setId:set.id})));
       if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
@@ -580,14 +583,24 @@ function firebaseFirestoreError(error) {
   if(messages[error.code])return `${messages[error.code]}${error.message?` (${error.message})`:""}`;
   return `Không thể truy cập Firestore: ${error.message}`;
 }
+function firebaseStorageError(error) {
+  const messages={
+    "storage/unauthorized":"Cloud Storage từ chối tải ảnh. Bật Storage cho đúng project và triển khai storage.rules mới nhất.",
+    "storage/quota-exceeded":"Cloud Storage đã hết hạn mức dung lượng.",
+    "storage/retry-limit-exceeded":"Tải ảnh lên Cloud Storage quá số lần thử. Kiểm tra mạng rồi thử lại.",
+    "storage/bucket-not-found":"Không tìm thấy bucket Cloud Storage. Kiểm tra storageBucket trong firebase-config.js và tạo bucket trong Firebase Console.",
+    "storage/unauthenticated":"Phiên đăng nhập hết hạn. Đăng nhập lại rồi tải đề lên."
+  };
+  return messages[error.code]||`Không thể tải ảnh lên Cloud Storage: ${error.message||error.code||"lỗi không xác định"}`;
+}
 function sidebar() {
   const navs=isTeacher()
     ? [["home","home","Tổng quan"],["teacher-exams","book","Đề ôn tập"],["students","users","Học sinh"],["compare","chart","So sánh tiến bộ"],["errors","target","7 nhóm lỗi"],["library","upload","Kho câu hỏi"]]
-    : [["home","home","Đề ôn tập"],["progress","chart","Lộ trình cá nhân"],["compare","users","So sánh tiến bộ"],["personal","target","Ôn tập cá nhân hóa"],["library","upload","Kho câu hỏi"]];
+    : [["home","home","Đề ôn tập"],["progress","chart","Lộ trình cá nhân"],["compare","users","So sánh tiến bộ"],["personal","target","Ôn tập cá nhân hóa"],["library","upload","Kho đề"]];
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon("spark")}</span> Toán học</div><div class="nav-label">KHÔNG GIAN HỌC</div><nav class="nav">${navs.map(([key,ico,label])=>`<button data-page="${key}" class="${currentPage===key?"active":""}">${icon(ico)}<span>${label}</span>${key==="errors"&&isTeacher()?'<span class="nav-badge">7</span>':""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="help-card"><strong>Cần hỗ trợ?</strong><p>Khám phá mẹo học tập và hướng dẫn sử dụng nền tảng.</p><button data-action="help">Xem hướng dẫn →</button></div><div class="profile"><div class="avatar">${initial(userName())}</div><div class="profile-copy"><strong>${safe(userName())}</strong><span>${session?.role==="owner"?"Chủ sở hữu":isTeacher()?"Giáo viên":"Học sinh"}</span></div><button class="logout" data-action="logout" title="Đăng xuất">${icon("logout")}</button></div></div></aside>`;
 }
 function mobileNav() {
-  const entries=isTeacher()?[["home","home","Trang chủ"],["teacher-exams","book","Đề thi"],["students","users","Học sinh"],["compare","chart","Tiến bộ"]]:[["home","book","Đề ôn tập"],["progress","chart","Lộ trình"],["personal","target","Tự luyện"],["library","upload","Kho đề"]];
+  const entries=isTeacher()?[["home","home","Trang chủ"],["teacher-exams","book","Đề thi"],["students","users","Học sinh"],["compare","chart","Tiến bộ"]]:[["home","book","Đề ôn tập"],["progress","chart","Lộ trình"],["compare","users","So sánh"],["personal","target","Tự luyện"],["library","upload","Kho đề"]];
   return `<nav class="mobile-bottom">${entries.map(([key,ico,label])=>`<button data-page="${key}" class="${currentPage===key?"active":""}">${icon(ico)}${label}</button>`).join("")}</nav>`;
 }
 function pageTitle() {
@@ -702,13 +715,9 @@ function errorsPage() {
 function libraryPage() {
   const sets=data.sets||[];
   const canManage=isTeacher();
-  const uploadAction=canManage?`<button class="btn" data-action="upload-doc">${icon("upload")} Tải đề Word</button>`:"";
-  const subtitle=canManage
-    ?"Kho đề đã công bố dùng chung; giáo viên có thể tải, ẩn/hiện hoặc xóa bộ đề trong kho."
-    :"Xem kho đề giáo viên đã công bố và chọn bộ đề để tự luyện.";
-  return `${welcome("Kho câu hỏi",subtitle,uploadAction)}
-  <div class="grid stats">${statCard("Bộ đề đã công bố",sets.length,"","file","purple","Kho đề dùng chung")}${statCard("Câu hỏi",data.questions.length,"","book","green","Trong các đề đã công bố")}${statCard("Có hình ảnh",data.questions.filter(q=>q.hasImages).length,"","target","orange","Ảnh và hình vẽ được giữ lại")}${statCard("Đề đã giao",data.assignments.length,"","chart","blue","Đề ôn tập đang quản lý")}</div>
-  ${sets.length?`<div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">${sets.map(s=>`<div class="card section-card"><div class="section-heading"><div><div class="eyebrow">${safe(s.type||"ĐỀ ÔN TẬP")}</div><h2>${safe(s.title)}</h2><p>${s.questionCount} câu · ${safe(s.filename)}${canManage&&s.hiddenFromStudents?" · Đang ẩn với học sinh":""}</p></div><div class="toolbar"><button class="text-button" data-action="view-set" data-id="${safe(s.id)}">Xem trước</button>${canManage?`<button class="text-button" data-action="toggle-set-visibility" data-id="${safe(s.id)}">${s.hiddenFromStudents?"Hiện với học sinh":"Ẩn với học sinh"}</button><button class="text-button danger-text" data-action="delete-set" data-id="${safe(s.id)}">Xóa bộ câu hỏi</button>`:`<button class="text-button" data-action="choose-set" data-id="${safe(s.id)}">Chọn đề</button>`}</div></div><div>${(s.sections||[]).map(x=>`<span class="tag" style="margin-right:5px">${safe(x)}</span>`).join("")}</div></div>`).join("")}</div>`:`<div class="card section-card"><div class="empty"><div class="empty-icon">${icon("book")}</div><strong>Kho đề dùng chung đang trống</strong><p>${canManage?"Tải đề lên để công bố bộ câu hỏi cho học sinh và giáo viên khác.":"Giáo viên chưa công bố bộ đề nào."}</p>${canManage?`<button class="btn" data-action="upload-doc">${icon("upload")} Chọn file Word</button>`:""}</div></div>`}`;
+  return `${welcome("Kho câu hỏi",canManage?"Kho đề dùng chung; giáo viên có thể tải, ẩn/hiện hoặc xóa bộ đề.":"Xem trước kho đề giáo viên đã công bố và chọn bộ để tự luyện.",canManage?`<button class="btn" data-action="upload-doc">${icon("upload")} Tải đề Word</button>`:"")}
+  <div class="grid stats">${statCard("Bộ đề đã tải",sets.length,"","file","purple","Theo các chủ đề của bạn")}${statCard("Câu hỏi đã tách",data.questions.length,"","book","green","Đã nhận diện từ file Word")}${statCard("Có hình ảnh",data.questions.filter(q=>q.hasImages).length,"","target","orange","Ảnh và hình vẽ được giữ lại")}${statCard("Đề đã giao",data.assignments.length,"","chart","blue","Đề ôn tập đang quản lý")}</div>
+  ${sets.length?`<div class="grid" style="grid-template-columns:repeat(2,minmax(0,1fr))">${sets.map(s=>`<div class="card section-card"><div class="section-heading"><div><div class="eyebrow">${safe(s.type||"ĐỀ ÔN TẬP")}</div><h2>${safe(s.title)}</h2><p>${s.questionCount} câu · ${safe(s.filename)}${canManage&&s.hiddenFromStudents?" · Đang ẩn với học sinh":""}</p></div><div class="toolbar"><button class="text-button" data-action="view-set" data-id="${safe(s.id)}">Xem trước</button>${canManage?`<button class="text-button" data-action="toggle-set-visibility" data-id="${safe(s.id)}">${s.hiddenFromStudents?"Hiện với học sinh":"Ẩn với học sinh"}</button><button class="text-button danger-text" data-action="delete-set" data-id="${safe(s.id)}">Xóa bộ câu hỏi</button>`:`<button class="text-button" data-action="choose-set" data-id="${safe(s.id)}">Chọn đề</button>`}</div></div><div>${(s.sections||[]).map(x=>`<span class="tag" style="margin-right:5px">${safe(x)}</span>`).join("")}</div></div>`).join("")}</div>`:`<div class="card section-card"><div class="empty"><div class="empty-icon">${icon("upload")}</div><strong>${canManage?"Kho đề dùng chung đang trống":"Giáo viên chưa công bố bộ đề nào"}</strong><p>${canManage?"Tải đề lên để công bố bộ câu hỏi cho học sinh và giáo viên khác.":"Các bộ đề đã công bố sẽ xuất hiện tại đây."}</p>${canManage?`<button class="btn" data-action="upload-doc">${icon("upload")} Chọn file Word</button>`:""}</div></div>`}`;
 }
 function teacherExamsPage() {
   return `${welcome("Quản lý đề ôn tập","Chọn nguồn câu hỏi từ kho, trộn đề và giao cho học sinh.",`<button class="btn secondary" data-action="upload-doc">${icon("upload")} Tải đề Word</button><button class="btn" data-action="create-exam">${icon("plus")} Tạo đề mới</button>`)}
@@ -745,14 +754,8 @@ async function handleAction(button) {
     setSession(null);currentPage="home";return;
   }
   if(action==="help"){toast("Tải đề Word vào Kho câu hỏi, rồi chọn câu để tạo đề ôn tập.");return;}
-  if(action==="upload-doc"){
-    if(!isTeacher()){toast("Chỉ giáo viên mới được tải đề lên kho dùng chung.");return;}
-    showUploadModal("questions");return;
-  }
-  if(action==="upload-errors"){
-    if(!isTeacher()){toast("Chỉ giáo viên mới được tải tài liệu mã lỗi lên.");return;}
-    showUploadModal("errors");return;
-  }
+  if(action==="upload-doc"){showUploadModal("questions");return;}
+  if(action==="upload-errors"){showUploadModal("errors");return;}
   if(action==="add-student"){showStudentModal();return;}
   if(action==="schedule-delete-student"){
     if(!confirm("Đưa tài khoản này vào danh sách chờ xóa? Tài khoản chỉ bị xóa vĩnh viễn sau 24 giờ."))return;
@@ -810,7 +813,6 @@ async function handleAction(button) {
     }
   }
   if(action==="delete-set"){
-    if(!isTeacher()){toast("Chỉ giáo viên mới được xóa bộ đề.");return;}
     const set=data.sets.find(item=>item.id===id);
     if(!set)return;
     if(!confirm(`Xóa bộ câu hỏi "${set.title}" và ${set.questionCount} câu khỏi kho? Đề đã giao sẽ giữ bản sao câu hỏi.`))return;
@@ -819,7 +821,7 @@ async function handleAction(button) {
         await deleteFirebaseQuestionSet(set);
       } catch(error) {
         console.error("Could not delete Firebase question set.",error);
-        toast(`Không thể xóa bộ đề trên Firebase: ${firebaseFirestoreError(error)}`);
+        toast(`Không thể xóa bộ đề trên Firebase: ${error.code?.startsWith("storage/")?firebaseStorageError(error):firebaseFirestoreError(error)}`);
         return;
       }
     }
@@ -976,11 +978,11 @@ function showUploadModal(kind) {
     const button=event.currentTarget;
     const label=button.textContent;
     button.disabled=true;
-    button.textContent="Đang lưu câu hỏi…";
+    button.textContent="Đang lưu lên Firebase…";
     try { await saveUploadedDoc(errorsOnly); }
     catch(error) {
       console.error("Could not save uploaded document.",error);
-      const details=error.code==="app/teacher-role-required"?error.message:firebaseFirestoreError(error);
+      const details=error.code==="app/teacher-role-required"?error.message:error.code?.startsWith("storage/")?firebaseStorageError(error):firebaseFirestoreError(error);
       toast(`Không thể đồng bộ tài liệu lên Firebase: ${details}${error.code?` [${error.code}]`:""}`);
     } finally {
       if(button.isConnected){button.disabled=false;button.textContent=label;}
@@ -1229,22 +1231,14 @@ function replaceMathPlaceholders(html,mathMarkup) {
 async function parsePdfDocument(file,{analyzeQuestions=false}={}) {
   const pdfjs=await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs");
   pdfjs.GlobalWorkerOptions.workerSrc="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
-  const pdfjsCdn="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/";
-  const pdf=await pdfjs.getDocument({
-    data:new Uint8Array(await file.arrayBuffer()),
-    cMapUrl:`${pdfjsCdn}cmaps/`,
-    cMapPacked:true,
-    standardFontDataUrl:`${pdfjsCdn}standard_fonts/`
-  }).promise;
+  const pdf=await pdfjs.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise;
   if(pdf.numPages>80)throw new Error("PDF có hơn 80 trang. Hãy chia nhỏ tệp rồi tải từng phần.");
   const pages=new Map(),paragraphs=[];
   let extractedCharacters=0;
   for(let pageNumber=1;pageNumber<=pdf.numPages;pageNumber++) {
     const page=await pdf.getPage(pageNumber);
     const baseViewport=page.getViewport({scale:1});
-    // Render at up to 1600 px wide so small operators, superscripts and infinity signs
-    // remain legible in the per-question source crop stored by the free Firestore path.
-    const scale=Math.min(2.5,1600/baseViewport.width);
+    const scale=Math.min(1.5,1000/baseViewport.width);
     const viewport=page.getViewport({scale});
     const content=await page.getTextContent();
     const lines=groupPdfTextItems(content.items,pageNumber);
@@ -1377,22 +1371,16 @@ async function renderPdfQuestionImages(nodes,pages,questionStarts=[]) {
     }
     await source.renderPromise;
     let minY=Math.min(...lines.map(line=>line.y));
-    let maxY=Math.max(...lines.map(line=>line.y+line.height));
-    const nextQuestion=questionStarts
-      .map(node=>({page:Number(node.getAttribute("data-source-page")),y:Number(node.getAttribute("data-source-y")),height:Number(node.getAttribute("data-source-height"))||10}))
+    const maxY=Math.max(...lines.map(line=>line.y+line.height));
+    const nextQuestion=questionStarts.map(node=>({page:Number(node.getAttribute("data-source-page")),y:Number(node.getAttribute("data-source-y")),height:Number(node.getAttribute("data-source-height"))||10}))
       .filter(anchor=>anchor.page===pageNumber&&Number.isFinite(anchor.y)&&(pageNumber>currentPage||(pageNumber===currentPage&&anchor.y<currentY)))
       .sort((a,b)=>b.y-a.y)[0];
-    // PDF coordinates increase upward. Fractions, radicals, and superscripts belonging
-    // to the next question can sit above its heading in the text layer. Extend the
-    // previous crop's lower edge past that heading so the next question's glyphs stay
-    // together instead of appearing as a cut-off fragment at the bottom.
-    const headingPad=anchor=>Math.max(10,anchor.height*2.25);
-    if(nextQuestion)minY=Math.max(minY,nextQuestion.y+headingPad(nextQuestion));
+    if(nextQuestion)minY=Math.max(minY,nextQuestion.y+Math.max(10,nextQuestion.height*2.25));
     const padding=Math.max(18,Math.ceil(Math.max(...lines.map(line=>line.height))*source.scale*.75));
     const top=Math.max(0,Math.floor(source.viewport.height-maxY*source.scale-padding));
     const bottom=Math.min(source.canvas.height,Math.ceil(source.viewport.height-minY*source.scale+padding));
     const crop=document.createElement("canvas");
-    crop.width=source.canvas.width;crop.height=Math.max(1,bottom-top);
+    crop.width=source.canvas.width;crop.height=Math.max(24,bottom-top);
     crop.getContext("2d").drawImage(source.canvas,0,top,crop.width,crop.height,0,0,crop.width,crop.height);
     const dataUrl=crop.toDataURL("image/jpeg",.92);
     images.push(`<img class="pdf-source-image" src="${dataUrl}" alt="Ảnh câu hỏi từ trang PDF ${pageNumber}"/>`);
@@ -1426,14 +1414,11 @@ async function parseQuestionHtml(html,pdfPages=null,{analyzeQuestions=true}={}) 
     const detectedSection=sectionFromText(text);
     if(detectedSection) {
       currentSection=detectedSection;
+      preamble.push(block);
       continue;
     }
     if(isQuestionStart(text)) {
-      const context=preamble.filter(item=>{
-        const heading=item.textContent.trim();
-        return !(heading.length<100&&heading===heading.toLocaleUpperCase("vi")&&/[A-ZÀ-Ỵ]/.test(heading));
-      });
-      groups.push({blocks:[...context,block],section:currentSection});
+      groups.push({blocks:[...preamble,block],section:currentSection});
       preamble=[];
     }
     else if(groups.length) groups.at(-1).blocks.push(block);
@@ -1564,8 +1549,7 @@ function aiErrorMessage(error) {
   return error.message||"Dịch vụ AI hiện chưa sẵn sàng";
 }
 function isQuestionStart(text) {
-  const normalized=String(text).replace(/[\u00a0\u2007\u202f]/g," ").trimStart();
-  return /^(?:[\[(]\s*)?(?:(?:c[âa]u(?:\s*h[oỏ]i|\s*s[oố])?|b[àa]i(?:\s*t[aậ]p)?|question|problem|q)\s*(?:s[oố]\s*)?\d{1,3}(?:\s*[:.)]|\s+[-–—]\s+|\s+(?=\S)|$)|\d{1,3}\s*[.):]\s*(?=\S))/i.test(normalized);
+  return /^\s*(?:[\[(]\s*)?(?:(?:c[âa]u(?:\s*h[oỏ]i|\s*số)?|b[àa]i(?:\s*tập)?|question|problem|q)\s*(?:số\s*)?\d{1,3}\s*[.:)]?\s*|\d{1,3}\s*[.):]\s*(?=\S))/i.test(text);
 }
 function richTextSlice(node,start,end) {
   if(end<=start)return "";
@@ -1704,32 +1688,9 @@ function inferErrorCode(text) {
   if(/dinh nghia|khai niem|cong thuc|dinh ly|tinh chat|diem cuc tri|do thi|tiep can/i.test(normalized))return "KT";
   return null;
 }
-async function compressInlineImage(dataUrl,maxBytes=300*1024) {
-  if(!/^data:image\/(?:png|jpeg|webp);base64,/i.test(dataUrl)||dataUrl.length<maxBytes*1.35)return dataUrl;
-  try {
-    const image=new Image();
-    image.src=dataUrl;
-    await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=reject;});
-    const maxDimension=Math.max(image.naturalWidth,image.naturalHeight);
-    for(const dimension of [2000,1600,1400,1200,1000,850]) {
-      const scale=Math.min(1,dimension/maxDimension);
-      const canvas=document.createElement("canvas");
-      canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));
-      canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
-      canvas.getContext("2d").drawImage(image,0,0,canvas.width,canvas.height);
-      for(const quality of [0.88,0.82,0.76,0.7]) {
-        const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/webp",quality));
-        if(!blob)break;
-        if(blob.size<=maxBytes)return await new Promise((resolve,reject)=>{
-          const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(blob);
-        });
-      }
-    }
-  } catch(error) { console.warn("Không thể nén ảnh nhúng; sẽ thử lưu ảnh gốc.",error); }
-  return dataUrl;
-}
 async function saveQuestionSet(set) {
   await configureFirestore();
+  await configureFirebaseStorage();
   const fs=firebaseSdk;
   let uploadStep="kiểm tra hồ sơ giáo viên";
   const profile=await firebaseRequest(fs.getDoc(fs.doc(firebaseDb,"users",session.id)));
@@ -1739,32 +1700,40 @@ async function saveQuestionSet(set) {
     throw error;
   }
   const setRef=fs.doc(firebaseDb,"questionSets",set.id);
-  const metadata={
-    id:set.id,title:set.title,filename:set.filename,type:set.type,questionCount:set.questionCount,
-    sections:set.sections,teacherId:session.id,status:"uploading",hiddenFromStudents:false,createdAt:new Date().toISOString()
-  };
+  const metadata={id:set.id,title:set.title,filename:set.filename,type:set.type,questionCount:set.questionCount,sections:set.sections,teacherId:session.id,status:"uploading",hiddenFromStudents:false,createdAt:new Date().toISOString()};
   const storedQuestionIds=[];
+  const uploadedImages=[];
   try {
     uploadStep="tạo bộ đề trong Firestore";
     await firebaseRequest(fs.setDoc(setRef,metadata));
     const questions=[];
     for(const [questionIndex,original] of set.questions.entries()) {
       const question={...original,setId:set.id};
-      const preserveInlineImages=async html=>{
-        const parsed=new DOMParser().parseFromString(html||"","text/html");
-        for(const image of parsed.querySelectorAll("img")) {
-          if(/^data:image\/(?:png|jpeg|webp);base64,/i.test(image.src)) {
-            uploadStep=`nén hình câu ${questionIndex+1} để lưu trong Firestore`;
-            image.src=await compressInlineImage(image.src);
-          }
-        }
-        return parsed.body.innerHTML;
-      };
-      question.html=await preserveInlineImages(question.html);
-      for(const choice of question.choices||[]) {
-        choice.html=await preserveInlineImages(choice.html);
+      const parsed=new DOMParser().parseFromString(question.html||"","text/html");
+      let imageIndex=0;
+      for(const image of parsed.querySelectorAll("img")) {
+        if(!/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(image.src))continue;
+        uploadStep=`tải ảnh câu ${questionIndex+1} lên Storage`;
+        const imageRef=fs.ref(firebaseStorage,`question-set-assets/${session.id}/${set.id}/${question.id}-${imageIndex++}`);
+        await fs.uploadString(imageRef,image.src,"data_url");
+        uploadedImages.push(imageRef);
+        image.src=await fs.getDownloadURL(imageRef);
       }
-      if(new Blob([JSON.stringify(question)]).size>850*1024)throw new Error(`Câu ${question.questionNumber||question.id} vẫn quá lớn sau khi nén ảnh. Hãy giảm ảnh hoặc bỏ ảnh trong câu này.`);
+      question.html=parsed.body.innerHTML;
+      for(const choice of question.choices||[]) {
+        const choiceDocument=new DOMParser().parseFromString(choice.html||"","text/html");
+        let choiceImageIndex=0;
+        for(const image of choiceDocument.querySelectorAll("img")) {
+          if(!/^data:image\/(?:png|jpeg|gif|webp);base64,/i.test(image.src))continue;
+          uploadStep=`tải ảnh đáp án ${choice.label} của câu ${questionIndex+1} lên Storage`;
+          const imageRef=fs.ref(firebaseStorage,`question-set-assets/${session.id}/${set.id}/${question.id}-choice-${choice.label}-${choiceImageIndex++}`);
+          await fs.uploadString(imageRef,image.src,"data_url");
+          uploadedImages.push(imageRef);
+          image.src=await fs.getDownloadURL(imageRef);
+        }
+        choice.html=choiceDocument.body.innerHTML;
+      }
+      if(new Blob([JSON.stringify(question)]).size>850*1024)throw new Error(`Câu ${question.questionNumber||question.id} vượt giới hạn lưu an toàn của Firestore.`);
       uploadStep=`lưu câu ${questionIndex+1} vào Firestore`;
       await firebaseRequest(fs.setDoc(fs.doc(setRef,"questions",question.id),question));
       storedQuestionIds.push(question.id);
@@ -1775,6 +1744,7 @@ async function saveQuestionSet(set) {
     return {...set,...metadata,status:"published",questions};
   } catch(error) {
     await Promise.allSettled(storedQuestionIds.map(questionId=>fs.deleteDoc(fs.doc(setRef,"questions",questionId))));
+    await Promise.allSettled(uploadedImages.map(imageRef=>fs.deleteObject(imageRef)));
     await fs.deleteDoc(setRef).catch(()=>{});
     error.message=`${uploadStep}: ${error.message}`;
     throw error;
@@ -1782,15 +1752,26 @@ async function saveQuestionSet(set) {
 }
 async function deleteFirebaseQuestionSet(set) {
   await configureFirestore();
+  await configureFirebaseStorage();
   const fs=firebaseSdk;
   const setRef=fs.doc(firebaseDb,"questionSets",set.id);
-  const questions=await firebaseRequest(fs.getDocs(fs.collection(setRef,"questions")));
-  for(let index=0;index<questions.docs.length;index+=500) {
+  const snapshot=await firebaseRequest(fs.getDocs(fs.collection(setRef,"questions")));
+  for(let index=0;index<snapshot.docs.length;index+=500) {
     const batch=fs.writeBatch(firebaseDb);
-    questions.docs.slice(index,index+500).forEach(question=>batch.delete(question.ref));
+    snapshot.docs.slice(index,index+500).forEach(question=>batch.delete(question.ref));
     await firebaseRequest(batch.commit());
   }
   await firebaseRequest(fs.deleteDoc(setRef));
+  if(set.teacherId) {
+    try {
+      const folder=fs.ref(firebaseStorage,`question-set-assets/${set.teacherId}/${set.id}`);
+      const assets=await fs.listAll(folder);
+      await Promise.all(assets.items.map(asset=>fs.deleteObject(asset)));
+    } catch(error) {
+      console.warn("Deleted the shared question set, but could not remove every stored image.",error);
+      toast("Bộ đề đã xóa khỏi kho; một số ảnh lưu trữ cũ chưa được dọn.");
+    }
+  }
 }
 async function saveUploadedDoc(errorsOnly) {
   if(!pendingUpload)return;
@@ -1822,7 +1803,7 @@ async function saveUploadedDoc(errorsOnly) {
   pendingUpload=null;document.querySelector(".modal-backdrop")?.remove();render();
   toast(!savedLocally
     ?"Đã lưu bộ đề lên Firebase; trình duyệt không đủ dung lượng để lưu bản tạm."
-    :errorsOnly?"Đã lưu tài liệu và tạo tóm tắt nội dung.":cloudSaved?"Đã lưu câu hỏi và hình ảnh đã nén trong Firestore; tệp gốc không được lưu trên đám mây.":"Đã thêm bộ đề vào kho câu hỏi.");
+    :errorsOnly?"Đã lưu tài liệu và tạo tóm tắt nội dung.":cloudSaved?"Đã lưu bộ đề lên Firebase và đồng bộ kho câu hỏi.":"Đã thêm bộ đề vào kho câu hỏi.");
 }
 function summarizeErrors(text) {
   const matches=errors.filter(e=>e[1].toLocaleLowerCase("vi").split(" ").some(w=>w.length>4&&text.toLocaleLowerCase("vi").includes(w)));
@@ -1832,13 +1813,11 @@ function showSetModal(set) {
   if(!set)return;
   const qs=set.questions||[];
   if(!isTeacher()) {
-    showModal(`Xem trước bộ đề: ${safe(set.title)}`,
-      `<p class="subhead">${set.questionCount} câu · ${safe(set.filename)} · ${qs.filter(q=>q.hasImages).length} câu có hình.</p><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}</strong><span>${q.sourceImageOnly?"Nội dung được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,145))}${q.content.length>145?"…":""}`}</span></div><details class="review-detail"><summary>Xem nội dung câu hỏi</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div></details></article>`).join("")}</div>`,
-      `<button class="btn secondary" data-action="close-modal">Đóng</button><button class="btn" data-action="choose-set" data-id="${safe(set.id)}">Chọn đề tự luyện</button>`);
+    showModal(`Xem trước bộ đề: ${safe(set.title)}`,`<p class="subhead">${set.questionCount} câu · ${safe(set.filename)} · ${qs.filter(q=>q.hasImages).length} câu có hình.</p><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}</strong><span>${safe(q.content.slice(0,145))}${q.content.length>145?"…":""}</span></div><details class="review-detail"><summary>Xem nội dung câu hỏi</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div></details></article>`).join("")}</div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button><button class="btn" data-action="choose-set" data-id="${safe(set.id)}">Chọn bộ đề này</button>`);
     return;
   }
   const counts=Object.fromEntries(["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(section=>[section,qs.filter(q=>q.section===section).length]));
-  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<p class="subhead">${set.questionCount} câu · ${safe(set.filename)} · ${qs.filter(q=>q.hasImages).length} câu có hình. Phần thi và mã lỗi đã được gợi ý tự động.</p><div class="review-summary">${Object.entries(counts).map(([section,count])=>`<span>${section}: <b>${count}</b></span>`).join("")}<span>Cần rà soát: <b>${qs.filter(q=>q.classificationConfidence==="review"||!q.errorId).length}</b></span></div><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${q.sourceImageOnly?"Nội dung được giữ nguyên trong ảnh câu hỏi.":`${safe(q.content.slice(0,145))}${q.content.length>145?"…":""}`}</span><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${q.id}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${q.id}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${q.id}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div><p class="notice">AI tách câu và công thức khi được bật lúc tải tài liệu. Đáp án AI luôn để trống, không tự giải; phần thi và mã lỗi là gợi ý, hãy kiểm tra nội dung và đáp án trước khi lưu.</p>`,`<button class="btn" data-action="close-modal">Lưu rà soát</button>`);
+  showModal(`Rà soát bộ đề: ${safe(set.title)}`,`<p class="subhead">${set.questionCount} câu · ${safe(set.filename)} · ${qs.filter(q=>q.hasImages).length} câu có hình. Phần thi và mã lỗi đã được gợi ý tự động.</p><div class="review-summary">${Object.entries(counts).map(([section,count])=>`<span>${section}: <b>${count}</b></span>`).join("")}<span>Cần rà soát: <b>${qs.filter(q=>q.classificationConfidence==="review"||!q.errorId).length}</b></span></div><div class="question-preview review-list">${qs.map((q,i)=>`<article class="review-row"><div class="review-info"><strong>Câu ${i+1}${q.classificationConfidence==="review"?'<span class="priority">Cần xem</span>':""}</strong><span>${safe(q.content.slice(0,145))}${q.content.length>145?"…":""}</span><small>${q.choices?.length?`${q.choices.length} lựa chọn`:"Câu trả lời ngắn"} · ${q.hasImages?"Có hình": "Không có hình"}</small></div><select aria-label="Phần đề câu ${i+1}" class="question-section compact-select" data-question-id="${q.id}">${["Trắc nghiệm","Đúng / Sai","Trả lời ngắn"].map(s=>`<option ${q.section===s?"selected":""}>${s}</option>`).join("")}</select><select aria-label="Mã lỗi câu ${i+1}" class="question-error compact-select" data-question-id="${q.id}"><option value="">Mã lỗi…</option>${errors.map(e=>`<option value="${e[0]}" ${q.errorId===e[0]?"selected":""}>${e[0]}</option>`).join("")}</select><details class="review-detail"><summary>Xem câu và đáp án</summary><div class="doc-html">${q.html||safe(q.content)}${renderQuestionChoices(q)}</div><label class="answer-key-label">Đáp án đúng <input class="question-key" data-question-id="${q.id}" value="${safe(q.answerKey||"")}" placeholder="${q.section==="Trả lời ngắn"?"Ví dụ: 2 hoặc 3/4":"A, B, C, D hoặc chuỗi Đ/S"}"/></label></details></article>`).join("")}</div><p class="notice">AI tách câu và công thức khi được bật lúc tải tài liệu. Đáp án AI luôn để trống, không tự giải; phần thi và mã lỗi là gợi ý, hãy kiểm tra nội dung và đáp án trước khi lưu.</p>`,`<button class="btn" data-action="close-modal">Lưu rà soát</button>`);
   document.querySelectorAll(".question-error").forEach(el=>el.onchange=()=>updateQuestion(set.id,el.dataset.questionId,{errorId:el.value||null}));
   document.querySelectorAll(".question-key").forEach(el=>el.onchange=()=>{
     const question=set.questions.find(item=>item.id===el.dataset.questionId);

@@ -86,13 +86,9 @@ service cloud.firestore {
       allow create: if staff()
         && request.resource.data.teacherId == request.auth.uid
         && request.resource.data.status == "uploading"
-        && request.resource.data.keys().hasAll([
-          "id", "title", "filename", "type", "questionCount", "sections",
-          "teacherId", "status", "createdAt"
-        ])
         && request.resource.data.keys().hasOnly([
           "id", "title", "filename", "type", "questionCount", "sections",
-          "teacherId", "status", "createdAt", "sourcePath", "sourceContentType", "hiddenFromStudents"
+          "teacherId", "status", "createdAt", "hiddenFromStudents"
         ]);
       allow update: if staff() && (
         (resource.data.teacherId == request.auth.uid
@@ -111,17 +107,15 @@ service cloud.firestore {
           return get(/databases/$(database)/documents/questionSets/$(setId));
         }
         allow read: if signedIn() && exists(/databases/$(database)/documents/questionSets/$(setId)) && (
-          staff() || (questionSet().data.status == "published" && questionSet().data.hiddenFromStudents == false)
+          (staff() && (questionSet().data.status == "published" || questionSet().data.teacherId == request.auth.uid))
+          || (questionSet().data.status == "published" && questionSet().data.hiddenFromStudents == false)
         );
-        allow create: if staff()
-          && exists(/databases/$(database)/documents/questionSets/$(setId))
-          && questionSet().data.teacherId == request.auth.uid
-          && questionSet().data.status == "uploading";
-        allow update: if staff()
-          && exists(/databases/$(database)/documents/questionSets/$(setId))
+        allow create: if staff() && exists(/databases/$(database)/documents/questionSets/$(setId)) && (
+          questionSet().data.teacherId == request.auth.uid && questionSet().data.status == "uploading"
+        );
+        allow update: if staff() && exists(/databases/$(database)/documents/questionSets/$(setId))
           && questionSet().data.status == "published";
-        allow delete: if staff()
-          && exists(/databases/$(database)/documents/questionSets/$(setId));
+        allow delete: if staff() && exists(/databases/$(database)/documents/questionSets/$(setId));
       }
     }
     match /errorDocs/{errorDocId} {
