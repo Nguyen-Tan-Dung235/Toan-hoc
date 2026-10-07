@@ -22,6 +22,8 @@
         "Toán/**",
         "functions/**",
         "legacy-redirect/**",
+        "chat.json",
+        "**/chat.json",
         "**/.*",
         "**/node_modules/**"
       ],
@@ -48,6 +50,12 @@
         },
         {
           "source": "/styles.css",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+          ]
+        },
+        {
+          "source": "/firebase-config.js",
           "headers": [
             { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
           ]

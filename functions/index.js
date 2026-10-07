@@ -3,7 +3,10 @@
 const {initializeApp} = require("firebase-admin/app");
 const {getAuth} = require("firebase-admin/auth");
 const {FieldValue, Timestamp, getFirestore} = require("firebase-admin/firestore");
+const {getStorage} = require("firebase-admin/storage");
+const functionsV1 = require("firebase-functions/v1");
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
+const {onDocumentDeleted} = require("firebase-functions/v2/firestore");
 const {onSchedule} = require("firebase-functions/v2/scheduler");
 const {defineSecret} = require("firebase-functions/params");
 const logger = require("firebase-functions/logger");
@@ -31,6 +34,87 @@ async function requireStudent(studentId) {
     throw new HttpsError("not-found", "Không tìm thấy tài khoản học sinh hợp lệ.");
   }
   return {profileRef, profile};
+}
+
+async function purgeDeletedAccountData(uid, {deleteProfile = false} = {}) {
+  if (typeof uid !== "string" || !uid.trim()) throw new Error("A valid Firebase UID is required to purge account data.");
+  const profileRef = db.doc(`users/${uid}`);
+  const [attempts, errorDocs, questionSets, teacherAssignments, studentAssignments] = await Promise.all([
+    db.collection("attempts").where("userId", "==", uid).get(),
+    db.collection("errorDocs").where("teacherId", "==", uid).get(),
+    db.collection("questionSets").where("teacherId", "==", uid).get(),
+    db.collection("assignments").where("teacherId", "==", uid).get(),
+    db.collection("assignments").where("studentIds", "array-contains", uid).get(),
+  ]);
+  const ownedAssignmentIds = new Set(teacherAssignments.docs.map((document) => document.id));
+  const recursivelyDeleted = [
+    ...(deleteProfile ? [profileRef] : []),
+    ...attempts.docs.map((document) => document.ref),
+    ...errorDocs.docs.map((document) => document.ref),
+    ...questionSets.docs.map((document) => document.ref),
+    ...teacherAssignments.docs.map((document) => document.ref),
+  ];
+  await Promise.all([
+    ...recursivelyDeleted.map((reference) => db.recursiveDelete(reference)),
+    getStorage().bucket().deleteFiles({prefix: `question-set-assets/${uid}/`}),
+  ]);
+  await Promise.all(studentAssignments.docs
+    .filter((document) => !ownedAssignmentIds.has(document.id))
+    .map((document) => {
+      const studentIds = (document.get("studentIds") || []).filter((studentId) => studentId !== uid);
+      return document.ref.update({studentIds, students: studentIds.length});
+    }));
+}
+
+exports.purgeDataWhenFirestoreAccountDeleted = onDocumentDeleted({
+  document: "users/{userId}",
+  retry: true,
+  timeoutSeconds: 540,
+  memory: "1GiB",
+}, async (event) => {
+  const uid = event.params.userId;
+  if ((await db.doc(`users/${uid}`).get()).exists) {
+    logger.info("Skipped stale deletion cleanup because the Firebase profile was recreated.", {uid});
+    return;
+  }
+  await purgeDeletedAccountData(uid);
+  logger.info("Purged data after a Firebase profile was deleted.", {uid});
+});
+
+exports.purgeDataWhenAuthAccountDeleted = functionsV1.runWith({timeoutSeconds: 540, memory: "1GB"})
+  .auth.user().onDelete(async (user) => {
+  await purgeDeletedAccountData(user.uid, {deleteProfile: true});
+  logger.info("Purged data after a Firebase Authentication account was deleted.", {uid: user.uid});
+});
+
+exports.purgeDataForMissingProfile = onCall({timeoutSeconds: 540, memory: "1GiB"}, async (request) => {
+  if (!request.auth) throw new HttpsError("unauthenticated", "Vui lòng đăng nhập.");
+  const profile = await db.doc(`users/${request.auth.uid}`).get();
+  if (profile.exists) {
+    return {purged: false, profileExists: true};
+  }
+  await purgeDeletedAccountData(request.auth.uid);
+  return {purged: true};
+});
+
+async function purgeProfilesWithoutAuthAccounts() {
+  const authUids = new Set();
+  let pageToken;
+  do {
+    const page = await auth.listUsers(1000, pageToken);
+    for (const user of page.users) authUids.add(user.uid);
+    pageToken = page.pageToken;
+  } while (pageToken);
+
+  const profiles = await db.collection("users").get();
+  const orphaned = profiles.docs.filter((profile) => !authUids.has(profile.id));
+  for (let index = 0; index < orphaned.length; index += 20) {
+    await Promise.all(orphaned.slice(index, index + 20).map(async (profile) => {
+      await purgeDeletedAccountData(profile.id, {deleteProfile: true});
+      logger.info("Purged a Firebase profile without an Authentication account.", {uid: profile.id});
+    }));
+  }
+  return orphaned.length;
 }
 
 exports.analyzeMathQuestions = onCall({
@@ -274,7 +358,11 @@ exports.setStudentRole = onCall(async (request) => {
   return {role};
 });
 
-exports.purgeExpiredStudentAccounts = onSchedule("every 15 minutes", async () => {
+exports.purgeExpiredStudentAccounts = onSchedule({
+  schedule: "every 15 minutes",
+  timeoutSeconds: 540,
+  memory: "1GiB",
+}, async () => {
   const now = Timestamp.now();
   const pending = await db.collection("users")
     .where("accountStatus", "==", "pendingDeletion")
@@ -324,4 +412,7 @@ exports.purgeExpiredStudentAccounts = onSchedule("every 15 minutes", async () =>
       });
     }
   }
+
+  const orphanedProfiles = await purgeProfilesWithoutAuthAccounts();
+  if (orphanedProfiles) logger.info("Reconciled Firebase profiles whose Auth accounts were removed.", {count: orphanedProfiles});
 });

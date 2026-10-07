@@ -7,3 +7,6 @@ window.FIREBASE_CONFIG = {
   appId: "1:1091341892168:web:9890bd7eacf3391a44f67d",
   measurementId: "G-ME3SPMSL3V"
 };
+// reCAPTCHA v3 public site key for Firebase App Check. Set this after registering
+// the web app in Firebase Console → App Check; enforcement is enabled in Console.
+window.FIREBASE_APP_CHECK_SITE_KEY = "";

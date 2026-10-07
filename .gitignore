@@ -2,6 +2,8 @@
 .firebase/
 firebase-debug.log
 firebase-debug.*.log
+chat.json
+**/chat.json
 
 # Dependencies and generated output
 node_modules/

@@ -175,12 +175,15 @@ service cloud.firestore {
         function parentAttempt() {
           return get(/databases/$(database)/documents/attempts/$(attemptId));
         }
+        function parentAttemptAfter() {
+          return getAfter(/databases/$(database)/documents/attempts/$(attemptId));
+        }
         allow read: if signedIn()
           && exists(/databases/$(database)/documents/attempts/$(attemptId))
           && (staff() || (activeStudent() && parentAttempt().data.userId == request.auth.uid));
         allow create: if activeStudent()
-          && exists(/databases/$(database)/documents/attempts/$(attemptId))
-          && parentAttempt().data.userId == request.auth.uid
+          && existsAfter(/databases/$(database)/documents/attempts/$(attemptId))
+          && parentAttemptAfter().data.userId == request.auth.uid
           && request.resource.data.keys().hasAll([
             "id", "userId", "ordinal", "questionId", "questionNumber", "section",
             "errorIndex", "errorName", "content", "html", "sourceImageOnly", "choices",
@@ -195,6 +198,7 @@ service cloud.firestore {
           && request.resource.data.userId == request.auth.uid
           && request.resource.data.ordinal is int
           && request.resource.data.ordinal > 0
+          && request.resource.data.ordinal <= parentAttemptAfter().data.reviewQuestionCount
           && request.resource.data.questionId is string
           && request.resource.data.questionId.size() <= 160
           && request.resource.data.questionNumber is string
