@@ -514,10 +514,9 @@ function attemptTimestampMillis(value) {
 }
 function formatAttemptTimestamp(value) {
   const timestamp=attemptTimestampMillis(value);
-  if(!timestamp)return "Không rõ thời điểm";
+  if(!timestamp)return "Không rõ ngày";
   return new Intl.DateTimeFormat("vi-VN",{
-    timeZone:"Asia/Ho_Chi_Minh",day:"2-digit",month:"2-digit",year:"numeric",
-    hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"
+    timeZone:"Asia/Ho_Chi_Minh",day:"2-digit",month:"2-digit",year:"numeric"
   }).format(new Date(timestamp));
 }
 async function loadFirebaseAttempts({forceServer=false}={}) {
@@ -1028,12 +1027,12 @@ function teacherProgressStatus() {
 function teacherHome() {
   const students=data.users.filter(u=>u.role==="student"),allAttempts=sortAttempts(data.attempts),scored=allAttempts.filter(attempt=>Number.isFinite(attempt.score)),average=avg(scored.map(attempt=>attempt.score)),recent=data.assignments.slice(0,3),activities=allAttempts.slice(-3).reverse();
   const dateLabel=new Date().toLocaleDateString("vi-VN",{day:"2-digit",month:"long",year:"numeric"});
-  const timesAgo=value=>{const seconds=Math.max(0,Math.floor((Date.now()-attemptTimestampMillis(value))/1000));if(!attemptTimestampMillis(value))return "Không rõ thời điểm";if(seconds<60)return "Vừa xong";if(seconds<3600)return `${Math.floor(seconds/60)} phút trước`;if(seconds<86400)return `${Math.floor(seconds/3600)} giờ trước`;return formatAttemptTimestamp(value)};
+  const attemptDate=value=>formatAttemptTimestamp(value);
   return `${welcome(`Chào ${safe(userName())} 👋`,"Cùng xem tình hình học tập và giúp học sinh tiến bộ hơn nhé.",`<button class="date-chip">${icon("calendar")} ${dateLabel}</button>`)}
   ${teacherProgressStatus()}
   <div class="grid stats">${statCard("Tổng số học sinh",students.length,"","users","purple","Tài khoản học sinh trên hệ thống")}${statCard("Đề ôn tập",data.assignments.length,"","book","green","Đề bạn đã tạo hoặc giao")}${statCard("Điểm trung bình",average,"","chart","orange","Trên các lượt đã chấm")}${statCard("Bài đã hoàn thành",allAttempts.length,"","target","blue","Lịch sử đã đồng bộ")}</div>
   <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Tiến bộ của lớp</h2><p>Điểm các lượt luyện tập đã chấm</p></div><div class="chart-legend"><span><i class="legend-dot"></i>Điểm số</span></div></div>${scoreChart(scored.slice(-6).map(attempt=>attempt.score))}</section>
-  <section class="card section-card"><div class="section-heading"><div><h2>Hoạt động gần đây</h2><p>Cập nhật từ các lượt làm bài đã đồng bộ</p></div><button class="text-button" data-page="compare">Xem tất cả</button></div><div class="activity-list">${activities.length?activities.map(attempt=>{const student=students.find(user=>user.id===attempt.userId);return `<div class="activity"><div class="avatar">${initial(student?.name||"HS")}</div><div class="activity-main"><strong>${safe(student?.name||"Học sinh")} đã hoàn thành ${safe(attempt.title)}</strong><span>${timesAgo(attempt.createdAt)}</span></div><span class="activity-score">${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</span></div>`}).join(""):`<div class="empty">Chưa có lượt làm bài được đồng bộ.</div>`}</div></section></div>
+  <section class="card section-card"><div class="section-heading"><div><h2>Hoạt động gần đây</h2><p>Cập nhật từ các lượt làm bài đã đồng bộ</p></div><button class="text-button" data-page="compare">Xem tất cả</button></div><div class="activity-list">${activities.length?activities.map(attempt=>{const student=students.find(user=>user.id===attempt.userId);return `<div class="activity"><div class="avatar">${initial(student?.name||"HS")}</div><div class="activity-main"><strong>${safe(student?.name||"Học sinh")} đã hoàn thành ${safe(attempt.title)}</strong><span>${attemptDate(attempt.createdAt)}</span></div><span class="activity-score">${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</span></div>`}).join(""):`<div class="empty">Chưa có lượt làm bài được đồng bộ.</div>`}</div></section></div>
   <div class="grid bottom-grid"><section class="card section-card"><div class="section-heading"><div><h2>Đề ôn tập gần đây</h2><p>Theo dõi những đề bạn đã giao</p></div><button class="text-button" data-page="teacher-exams">Quản lý đề →</button></div>${assignmentList(recent)}</section><section class="card section-card"><div class="section-heading"><div><h2>Nhóm lỗi cần lưu ý</h2><p>Lỗi phổ biến qua các lượt làm gần nhất</p></div><button class="text-button" data-page="errors">Chi tiết</button></div>${donut(aggregateMistakes(students))}</section></div>`;
 }
 function aggregateMistakes(users) { return errors.map((_,i)=>users.reduce((n,u)=>n+(userStats(u).counts[i]||0),0)); }
@@ -1077,7 +1076,7 @@ function attemptTable(attempts) {
     if(attemptHistoryState==="error")return `${historyNotice}<div class="empty">Chưa thể xác định lịch sử bài làm. Hãy thử tải lại.</div>`;
     return `<div class="empty">Các bài luyện tập hoàn thành sẽ xuất hiện tại đây.<br/><br/><button class="btn" data-page="home">Chọn đề ôn tập</button></div>`;
   }
-  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN LÀM</th><th>THỜI ĐIỂM HOÀN THÀNH (24H)</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td><time datetime="${safe(typeof a.createdAt==="string"?a.createdAt:"")}">${formatAttemptTimestamp(a.createdAt)}</time></td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
+  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN LÀM</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td><time datetime="${safe(typeof a.createdAt==="string"?a.createdAt:"")}">${formatAttemptTimestamp(a.createdAt)}</time></td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 function formatDuration(seconds) { return `${Math.floor(seconds/60)} phút ${seconds%60} giây`; }
 function formatAttemptAnswer(value) {
@@ -1146,7 +1145,7 @@ async function showAttemptReview(attempt) {
     return;
   }
   if(!reviewQuestions?.length) {
-    showModal(`Xem lại: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("book")}</div><strong>Lượt làm cũ chưa lưu chi tiết từng câu</strong><p>Hệ thống trước đây chỉ lưu điểm tổng và số câu sai theo nhóm, nên không thể khôi phục câu hỏi hoặc lựa chọn bạn đã trả lời cho lượt này.</p><div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span>Số câu đúng <b>${attempt.correct}/${attempt.graded??attempt.total}</b></span><span>Thời điểm <b>${formatAttemptTimestamp(attempt.createdAt)}</b></span></div></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+    showModal(`Xem lại: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("book")}</div><strong>Lượt làm cũ chưa lưu chi tiết từng câu</strong><p>Hệ thống trước đây chỉ lưu điểm tổng và số câu sai theo nhóm, nên không thể khôi phục câu hỏi hoặc lựa chọn bạn đã trả lời cho lượt này.</p><div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span>Số câu đúng <b>${attempt.correct}/${attempt.graded??attempt.total}</b></span><span>Ngày làm <b>${formatAttemptTimestamp(attempt.createdAt)}</b></span></div></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
     document.querySelector(".modal")?.classList.add("modal-attempt-review");
     return;
   }
@@ -1155,7 +1154,7 @@ async function showAttemptReview(attempt) {
   const ungraded=reviewQuestions.length-correct-incorrect;
   const gradedReview=reviewQuestions.filter(hasAnswerKey).length;
   const reviewedScore=gradedReview?Math.round(correct/gradedReview*100)/10:null;
-  const body=`<div class="attempt-review-summary"><span>Điểm đối chiếu <b>${reviewedScore===null?"Chưa chấm":`${reviewedScore}/10`}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>Thời gian làm <b>${formatDuration(attempt.duration)}</b></span><span>Hoàn thành <b>${formatAttemptTimestamp(attempt.createdAt)}</b></span></div><p class="subhead">Điểm xem lại được tính từ đáp án và câu trả lời đã lưu.</p><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
+  const body=`<div class="attempt-review-summary"><span>Điểm đối chiếu <b>${reviewedScore===null?"Chưa chấm":`${reviewedScore}/10`}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>Thời gian làm <b>${formatDuration(attempt.duration)}</b></span><span>Ngày làm <b>${formatAttemptTimestamp(attempt.createdAt)}</b></span></div><p class="subhead">Điểm xem lại được tính từ đáp án và câu trả lời đã lưu.</p><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
   showModal(`Xem lại bài: ${safe(attempt.title)}`,body,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
   document.querySelector(".modal")?.classList.add("modal-attempt-review");
   void typesetMath(document.querySelector(".modal"));
