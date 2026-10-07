@@ -76,6 +76,9 @@ let questionSetUnsubscribe = null;
 let questionSetSyncGeneration = 0;
 let attemptUnsubscribe = null;
 let attemptSyncGeneration = 0;
+let attemptHistoryState = "idle";
+let attemptHistoryError = "";
+const pendingAttemptWrites = new Map();
 let profileUnsubscribe = null;
 let profileSyncGeneration = 0;
 let errorCategoryUnsubscribe = null;
@@ -103,9 +106,22 @@ function loadData() {
   return structuredClone(sample);
 }
 function saveData() {
-  const persisted=session?.source==="firebase"
-    ?{...data,attempts:data.attempts.map(attempt=>{const {reviewQuestions,...summary}=attempt;return summary;}),users:[],sets:[],questions:[],assignments:[],errorDocs:[]}
-    :data;
+  let persisted=data;
+  if(session?.source==="firebase") {
+    let reviewBudget=1200*1024;
+    const localReviews=new Map();
+    for(const attempt of data.attempts.filter(item=>!item.cloudSynced&&Array.isArray(item.reviewQuestions)).slice().sort((left,right)=>Date.parse(right.createdAt||"")-Date.parse(left.createdAt||""))) {
+      const bytes=new Blob([JSON.stringify(attempt.reviewQuestions)]).size;
+      if(bytes>reviewBudget)continue;
+      localReviews.set(attempt.id,attempt.reviewQuestions);
+      reviewBudget-=bytes;
+    }
+    persisted={...data,attempts:data.attempts.map(attempt=>{
+      const {reviewQuestions,cloudSynced,...summary}=attempt;
+      if(localReviews.has(attempt.id))summary.reviewQuestions=localReviews.get(attempt.id);
+      return summary;
+    }),users:[],sets:[],questions:[],assignments:[],errorDocs:[]};
+  }
   try { localStorage.setItem(STORE_KEY, JSON.stringify(persisted)); }
   catch(error) {
     console.error("Không thể lưu dữ liệu trên trình duyệt.", error);
@@ -128,6 +144,7 @@ function persistLegacyErrorDocs() {
 }
 function setSession(user) {
   const identityChanged=!user||session?.id!==user.id||session?.source!==user.source;
+  if(identityChanged){attemptHistoryState=user?.source==="firebase"?"loading":"idle";attemptHistoryError="";}
   const oldLocalErrorDocs=identityChanged&&user?.source==="firebase"&&session?.source!=="firebase"?data.errorDocs||[]:[];
   if(oldLocalErrorDocs.length) {
     legacyErrorDocs=mergeLegacyErrorDocs(legacyErrorDocs,data.errorDocs);
@@ -436,6 +453,7 @@ function firebaseAttemptPayload(attempt,userId) {
     graded:Math.max(0,Math.floor(Number(attempt.graded)||0)),
     duration:Math.max(0,Math.floor(Number(attempt.duration)||0)),
     createdAt:typeof attempt.createdAt==="string"?attempt.createdAt:new Date().toISOString(),
+    reviewQuestionCount:Array.isArray(attempt.reviewQuestions)?attempt.reviewQuestions.length:0,
     mistakes:errors.map((_,index)=>Math.max(0,Math.floor(Number(attempt.mistakes?.[index])||0))),
     questionTimes:Object.fromEntries(Object.entries(attempt.questionTimes||{}).filter(([,seconds])=>Number.isFinite(seconds)&&seconds>=0))
   };
@@ -465,8 +483,22 @@ async function saveFirebaseAttempt(attempt,userId=session?.id) {
       }
       await firebaseRequest(batch.commit());
     }
+    const finalSnapshot=await firebaseRequest(firebaseSdk.getDocs(reviewCollection));
+    if(finalSnapshot.size<attempt.reviewQuestions.length)throw new Error(`Mới đồng bộ được ${finalSnapshot.size}/${attempt.reviewQuestions.length} câu để xem lại.`);
   }
+  attempt.cloudSynced=true;
+  saveData();
   return true;
+}
+function trackFirebaseAttemptSave(attempt,userId=session?.id) {
+  if(pendingAttemptWrites.has(attempt.id))return pendingAttemptWrites.get(attempt.id);
+  const promise=saveFirebaseAttempt(attempt,userId);
+  pendingAttemptWrites.set(attempt.id,promise);
+  promise.then(
+    ()=>{if(pendingAttemptWrites.get(attempt.id)===promise)pendingAttemptWrites.delete(attempt.id);},
+    ()=>{if(pendingAttemptWrites.get(attempt.id)===promise)pendingAttemptWrites.delete(attempt.id);}
+  );
+  return promise;
 }
 function sortAttempts(attempts) {
   return attempts.slice().sort((a,b)=>Date.parse(a.createdAt||"")-Date.parse(b.createdAt||"")||String(a.id).localeCompare(String(b.id)));
@@ -474,10 +506,13 @@ function sortAttempts(attempts) {
 async function loadFirebaseAttempts() {
   if(!session?.id||session.source!=="firebase")return false;
   const userId=session.id,staffView=isTeacher(),generation=++attemptSyncGeneration;
+  attemptHistoryState="loading";
+  attemptHistoryError="";
   attemptUnsubscribe?.();
   attemptUnsubscribe=null;
-  const localAttempts=data.attempts.filter(attempt=>attempt.userId===userId);
-  data.attempts=sortAttempts(localAttempts);
+  const cachedAttempts=staffView?data.attempts.slice():data.attempts.filter(attempt=>attempt.userId===userId);
+  const localAttempts=cachedAttempts.filter(attempt=>attempt.userId===userId);
+  data.attempts=sortAttempts(cachedAttempts);
   saveData();
   if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
   try {
@@ -490,21 +525,41 @@ async function loadFirebaseAttempts() {
     if(generation!==attemptSyncGeneration||session?.id!==userId)return false;
     const attempts=firebaseSdk.collection(firebaseDb,"attempts");
     const query=staffView?attempts:firebaseSdk.query(attempts,firebaseSdk.where("userId","==",userId));
-    attemptUnsubscribe=firebaseSdk.onSnapshot(query,snapshot=>{
+    const applySnapshot=snapshot=>{
       if(generation!==attemptSyncGeneration||session?.id!==userId)return;
       const remote=snapshot.docs.map(document=>({...document.data()}));
       const remoteIds=new Set(remote.map(attempt=>attempt.id));
-      const localFallback=data.attempts.filter(attempt=>attempt.userId===userId&&!remoteIds.has(attempt.id));
+      const localFallback=data.attempts.filter(attempt=>(staffView||attempt.userId===userId)&&!remoteIds.has(attempt.id));
       data.attempts=sortAttempts([...remote,...localFallback]);
+      attemptHistoryState="ready";
+      attemptHistoryError="";
       saveData();
       if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
-    },error=>{
+    };
+    const firstSnapshot=await firebaseRequest(firebaseSdk.getDocs(query));
+    if(generation!==attemptSyncGeneration||session?.id!==userId)return false;
+    applySnapshot(firstSnapshot);
+    let hasFreshServerSnapshot=!firstSnapshot.metadata?.fromCache;
+    const applyLiveSnapshot=snapshot=>{
+      if(hasFreshServerSnapshot&&snapshot.metadata?.fromCache)return;
+      if(!snapshot.metadata?.fromCache)hasFreshServerSnapshot=true;
+      applySnapshot(snapshot);
+    };
+    attemptUnsubscribe=firebaseSdk.onSnapshot(query,applyLiveSnapshot,error=>{
       console.error("Firebase attempt listener failed.",error);
+      attemptHistoryState="error";
+      attemptHistoryError=firebaseFirestoreError(error);
+      if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
       toast(`Không đồng bộ được lịch sử làm bài: ${firebaseFirestoreError(error)}`);
     });
     return true;
   } catch(error) {
     console.error("Could not sync Firebase attempts.",error);
+    if(generation===attemptSyncGeneration&&session?.id===userId) {
+      attemptHistoryState="error";
+      attemptHistoryError=firebaseFirestoreError(error);
+      if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
+    }
     toast(`Lịch sử vẫn được giữ trên thiết bị nhưng chưa đồng bộ: ${firebaseFirestoreError(error)}`);
     return false;
   }
@@ -970,15 +1025,21 @@ function assignmentList(assignments) {
 function progressPage(user) {
   const stats=userStats(user);
   const personalAttempts=sortAttempts(stats.attempts.filter(attempt=>attempt.source==="personal"));
-  const latestMistakes=personalAttempts.at(-1)?.mistakes||[0,0,0,0,0,0,0];
-  return `${welcome("Lộ trình cá nhân","Theo dõi điểm số, thời gian và những phần kiến thức bạn đã cải thiện.")}
-  <div class="grid stats">${statCard("Điểm trung bình",stats.average,"","chart","purple","Qua các bài đã chấm")}${statCard("Đề đã hoàn thành",stats.attempts.length||stats.scores.length,"","book","green","Tiến độ học tập")}${statCard("Thời gian trung bình",stats.attempts.length?`${Math.round(stats.attempts.reduce((n,a)=>n+a.duration,0)/stats.attempts.length/60)} phút`:"—","", "clock","orange","Mỗi đề đã làm")}${statCard("Nhóm lỗi cần chú ý",topError(latestMistakes)[1],"Đề tự luyện gần nhất","target","blue","Tên nhóm đầy đủ")}</div>
+  const personalScores=personalAttempts.map(attempt=>attempt.score).filter(Number.isFinite);
+  const latest=personalAttempts.at(-1),latestMistakes=latest?.mistakes||[0,0,0,0,0,0,0];
+  return `${welcome("Lộ trình cá nhân","Theo dõi lượt tự luyện và xem lại mọi câu trong các bài đã làm.")}
+  <div class="grid stats">${statCard("Đề tự luyện",personalAttempts.length,"","book","purple","Số lượt đã hoàn thành")}${statCard("Điểm tự luyện trung bình",personalScores.length?avg(personalScores):"—","","chart","green","Chỉ tính đề tự luyện")}${statCard("Điểm tự luyện gần nhất",latest&&Number.isFinite(latest.score)?`${latest.score}/10`:"—","","target","orange","Đề mới nhất")}${statCard("Nhóm lỗi đề mới nhất",latest?topError(latestMistakes)[1]:"Chưa có","","target","blue","Tên nhóm đầy đủ")}</div>
   ${personalPracticeEvaluation(personalAttempts)}
-  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử luyện tập</h2><p>Thời gian trả lời được ghi nhận trong từng lần làm bài</p></div></div>${attemptTable(stats.attempts)}</div>`;
+  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử tất cả bài làm</h2><p>Gồm đề tự luyện và đề giáo viên giao · Mở từng lượt để xem câu trả lời, đáp án và kết quả</p></div></div>${attemptTable(stats.attempts)}</div>`;
 }
 function attemptTable(attempts) {
-  if(!attempts.length)return `<div class="empty">Các bài luyện tập hoàn thành sẽ xuất hiện tại đây.<br/><br/><button class="btn" data-page="home">Chọn đề ôn tập</button></div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td>${new Date(a.createdAt).toLocaleDateString("vi-VN")}</td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
+  const historyNotice=attemptHistoryState==="error"?`<div class="notice">Không tải được lịch sử mới nhất: ${safe(attemptHistoryError)} <button class="text-button" data-action="retry-attempt-history">Thử tải lại</button></div>`:"";
+  if(!attempts.length) {
+    if(attemptHistoryState==="loading")return `<div class="empty">Đang tải lịch sử học tập từ máy chủ…</div>`;
+    if(attemptHistoryState==="error")return `${historyNotice}<div class="empty">Chưa thể xác định lịch sử bài làm. Hãy thử tải lại.</div>`;
+    return `<div class="empty">Các bài luyện tập hoàn thành sẽ xuất hiện tại đây.<br/><br/><button class="btn" data-page="home">Chọn đề ôn tập</button></div>`;
+  }
+  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td>${new Date(a.createdAt).toLocaleDateString("vi-VN")}</td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 function formatDuration(seconds) { return `${Math.floor(seconds/60)} phút ${seconds%60} giây`; }
 function formatAttemptAnswer(value) {
@@ -988,38 +1049,75 @@ function formatAttemptAnswer(value) {
   return String(value).replace(/\|/g," · ").replace(/([A-D]):/g,"$1. ");
 }
 function attemptReviewQuestionMarkup(question,index) {
-  const isCorrect=question.isCorrect===true,isWrong=question.isCorrect===false;
+  const correctness=questionCorrectness(question),isCorrect=correctness===true,isWrong=correctness===false;
   const resultClass=isCorrect?"correct":isWrong?"incorrect":"ungraded";
   const resultLabel=isCorrect?"Đúng":isWrong?"Chưa đúng":"Chưa có đáp án chấm";
   const errorIndex=Number.isInteger(question.errorIndex)?question.errorIndex:errorIndexForCode(question.errorId);
   const errorName=errorIndex>=0?errors[errorIndex]?.[1]:question.errorName;
-  return `<article class="attempt-review-question ${resultClass}"><header><div><span class="attempt-question-number">Câu ${safe(question.questionNumber||index+1)}</span><span class="attempt-question-meta">${safe(question.section||"Câu hỏi")}${errorName?` · ${safe(errorName)}`:""}</span></div><span class="attempt-result-pill ${resultClass}">${resultLabel}</span></header><div class="attempt-review-content doc-html">${question.html||safe(question.content||"")}${renderQuestionChoices(question)}</div><div class="attempt-answer-grid"><div><span>Bài làm của bạn</span><strong>${safe(formatAttemptAnswer(question.userAnswer))}</strong></div><div class="attempt-correct-answer"><span>Đáp án đúng</span><strong>${question.answerKey?safe(formatAttemptAnswer(question.answerKey)):"Chưa có đáp án để đối chiếu"}</strong></div></div>${question.questionTime?`<small class="attempt-question-time">Thời gian câu này: ${formatDuration(question.questionTime)}</small>`:""}</article>`;
+  return `<article class="attempt-review-question ${resultClass}"><header><div><span class="attempt-question-number">Câu ${safe(question.questionNumber||index+1)}</span><span class="attempt-question-meta">${safe(question.section||"Câu hỏi")}${errorName?` · ${safe(errorName)}`:""}</span></div><span class="attempt-result-pill ${resultClass}">${resultLabel}</span></header><div class="attempt-review-content doc-html">${question.html||safe(question.content||"")}${renderQuestionChoices(question)}</div><div class="attempt-answer-grid"><div><span>Bài làm của bạn</span><strong>${safe(formatAttemptAnswer(question.userAnswer))}</strong></div><div class="attempt-correct-answer"><span>Đáp án đúng</span><strong>${hasAnswerKey(question)?safe(formatAttemptAnswer(question.answerKey)):"Chưa có đáp án để đối chiếu"}</strong></div></div>${question.questionTime?`<small class="attempt-question-time">Thời gian câu này: ${formatDuration(question.questionTime)}</small>`:""}</article>`;
 }
 async function showAttemptReview(attempt) {
   if(!attempt)return;
+  const pendingWrite=pendingAttemptWrites.get(attempt.id);
+  if(pendingWrite){toast("Đang chờ đồng bộ đủ câu trả lời để mở bài xem lại…");await pendingWrite.catch(()=>{});}
   let reviewQuestions=Array.isArray(attempt.reviewQuestions)?attempt.reviewQuestions:null;
-  if(!reviewQuestions&&session?.source==="firebase") {
+  let expectedCount=Number.isInteger(attempt.reviewQuestionCount)?attempt.reviewQuestionCount:null;
+  if(expectedCount===null&&reviewQuestions?.length)expectedCount=attempt.total;
+  let observedCount=reviewQuestions?.length||0;
+  if(session?.source==="firebase"&&(!reviewQuestions||expectedCount!==null&&reviewQuestions.length<expectedCount)) {
     try {
       await configureFirestore();
       const reviewRef=firebaseSdk.collection(firebaseSdk.doc(firebaseDb,"attempts",attempt.id),"questions");
-      const snapshot=await firebaseRequest(firebaseSdk.getDocs(reviewRef));
-      reviewQuestions=snapshot.docs.map(document=>document.data()).sort((left,right)=>Number(left.ordinal)-Number(right.ordinal));
-      if(reviewQuestions.length)attempt.reviewQuestions=reviewQuestions;
+      let snapshot;
+      for(let attemptIndex=0;attemptIndex<4;attemptIndex++) {
+        snapshot=await firebaseRequest(firebaseSdk.getDocs(reviewRef));
+        const remoteQuestions=snapshot.docs.map(document=>document.data()).sort((left,right)=>Number(left.ordinal)-Number(right.ordinal));
+        observedCount=remoteQuestions.length;
+        if(expectedCount===null&&remoteQuestions.length)expectedCount=attempt.total;
+        if(remoteQuestions.length&&(!expectedCount||remoteQuestions.length>=expectedCount)) {
+          reviewQuestions=remoteQuestions;
+          break;
+        }
+        if(!remoteQuestions.length&&expectedCount===null) {
+          reviewQuestions=[];
+          break;
+        }
+        if(attemptIndex<3)await new Promise(resolve=>setTimeout(resolve,300));
+      }
+      if(expectedCount===null&&attempt.reviewQuestions?.length)expectedCount=attempt.reviewQuestions.length;
+      if(expectedCount&&reviewQuestions?.length<expectedCount&&Array.isArray(attempt.reviewQuestions)&&attempt.reviewQuestions.length>=expectedCount&&attempt.userId===session.id) {
+        await trackFirebaseAttemptSave(attempt,session.id);
+        const recovered=await firebaseRequest(firebaseSdk.getDocs(reviewRef));
+        const recoveredQuestions=recovered.docs.map(document=>document.data()).sort((left,right)=>Number(left.ordinal)-Number(right.ordinal));
+        observedCount=recoveredQuestions.length;
+        if(recoveredQuestions.length>=expectedCount)reviewQuestions=recoveredQuestions;
+      }
+      if(reviewQuestions?.length&&(!expectedCount||reviewQuestions.length>=expectedCount))attempt.reviewQuestions=reviewQuestions;
     } catch(error) {
       console.error("Could not load a completed attempt for review.",error);
       toast(`Không tải được câu trả lời để xem lại: ${firebaseFirestoreError(error)}`);
       return;
     }
   }
+  if(expectedCount===null&&reviewQuestions?.length)expectedCount=reviewQuestions.length;
+  if(expectedCount&&(!reviewQuestions||reviewQuestions.length<expectedCount)) {
+    const savedCount=Math.max(reviewQuestions?.length||0,observedCount);
+    showModal(`Đang đồng bộ: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("clock")}</div><strong>Chi tiết lượt làm chưa tải đủ</strong><p>Hiện có ${savedCount}/${expectedCount} câu. Bài làm tổng đã hiện trong lịch sử; phần câu hỏi đang được đồng bộ lên máy chủ. Hãy thử tải lại sau ít giây.</p></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button><button class="btn" data-action="retry-attempt-review" data-id="${safe(attempt.id)}">Thử tải lại</button>`);
+    document.querySelector(".modal")?.classList.add("modal-attempt-review");
+    document.querySelector('.modal [data-action="retry-attempt-review"]')?.addEventListener("click",event=>{event.stopPropagation();document.querySelector(".modal-backdrop")?.remove();void showAttemptReview(attempt);});
+    return;
+  }
   if(!reviewQuestions?.length) {
     showModal(`Xem lại: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("book")}</div><strong>Lượt làm cũ chưa lưu chi tiết từng câu</strong><p>Hệ thống trước đây chỉ lưu điểm tổng và số câu sai theo nhóm, nên không thể khôi phục câu hỏi hoặc lựa chọn bạn đã trả lời cho lượt này.</p><div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span>Số câu đúng <b>${attempt.correct}/${attempt.graded??attempt.total}</b></span><span>Ngày làm <b>${new Date(attempt.createdAt).toLocaleDateString("vi-VN")}</b></span></div></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
     document.querySelector(".modal")?.classList.add("modal-attempt-review");
     return;
   }
-  const correct=reviewQuestions.filter(question=>question.isCorrect===true).length;
-  const incorrect=reviewQuestions.filter(question=>question.isCorrect===false).length;
+  const correct=reviewQuestions.filter(question=>questionCorrectness(question)===true).length;
+  const incorrect=reviewQuestions.filter(question=>questionCorrectness(question)===false).length;
   const ungraded=reviewQuestions.length-correct-incorrect;
-  const body=`<div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>${formatDuration(attempt.duration)}</span></div><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
+  const gradedReview=reviewQuestions.filter(hasAnswerKey).length;
+  const reviewedScore=gradedReview?Math.round(correct/gradedReview*100)/10:null;
+  const body=`<div class="attempt-review-summary"><span>Điểm đối chiếu <b>${reviewedScore===null?"Chưa chấm":`${reviewedScore}/10`}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>${formatDuration(attempt.duration)}</span></div><p class="subhead">Điểm xem lại được tính từ đáp án và câu trả lời đã lưu.</p><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
   showModal(`Xem lại bài: ${safe(attempt.title)}`,body,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
   document.querySelector(".modal")?.classList.add("modal-attempt-review");
   void typesetMath(document.querySelector(".modal"));
@@ -1060,7 +1158,7 @@ function studentManagementTable(users,disabled=false) {
 }
 function studentsTable(users,clickable) {
   if(!users.length)return `<div class="empty">Chưa có dữ liệu học sinh.</div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>ĐỀ ĐÃ LÀM</th><th>ĐIỂM TRUNG BÌNH</th><th>NHÓM CẦN ƯU TIÊN</th><th>TIẾN BỘ</th><th></th></tr></thead><tbody>${users.map(u=>{const s=userStats(u),worst=topError(s.counts),completed=s.attempts.length||s.scores.length;return `<tr ${clickable?`data-action="select-student" data-id="${u.id}" style="cursor:pointer"`:""}><td><div class="student-cell"><div class="avatar">${initial(u.name)}</div><div><strong>${safe(u.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(u.email)}</div></div></div></td><td>${completed} đề</td><td><strong>${s.average}</strong>/10</td><td><span class="priority">${worst[0]} · ${worst[1]}</span></td><td><span class="progress-track"><i style="width:${Math.min(100,(Number(s.latest)||0)*10)}%"></i></span>${s.latest||"—"}/10</td><td><span style="color:#9aa3b3">→</span></td></tr>`}).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>ĐỀ TỰ LUYỆN</th><th>ĐIỂM TB TỰ LUYỆN</th><th>NHÓM LỖI ĐỀ MỚI NHẤT</th><th>ĐIỂM GẦN NHẤT</th></tr></thead><tbody>${users.map(user=>{const personal=sortAttempts(userStats(user).attempts.filter(attempt=>attempt.source==="personal")),scores=personal.map(attempt=>attempt.score).filter(Number.isFinite),latest=personal.at(-1),worst=latest?topError(latest.mistakes||[0,0,0,0,0,0,0]):null;return `<tr ${clickable?`data-action="select-student" data-id="${safe(user.id)}" style="cursor:pointer"`:""}><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td>${personal.length} đề</td><td><strong>${scores.length?avg(scores):"—"}</strong>${scores.length?"/10":""}</td><td>${worst?`<span class="priority">${safe(worst[1])}</span>`:"Chưa tự luyện"}</td><td>${latest&&Number.isFinite(latest.score)?`${latest.score}/10`:"—"}</td></tr>`}).join("")}</tbody></table></div>`;
 }
 function errorsPage() {
   const teacher=isTeacher();
@@ -1299,6 +1397,15 @@ async function handleAction(button) {
     await showAttemptReview(attempt);
     return;
   }
+  if(action==="retry-attempt-review"){
+    const attempt=data.attempts.find(item=>item.id===id);
+    await showAttemptReview(attempt);
+    return;
+  }
+  if(action==="retry-attempt-history"){
+    await loadFirebaseAttempts();
+    return;
+  }
   if(action==="select-student"){selectedStudent=id;currentPage="compare";render();return;}
   if(action==="back-students"){selectedStudent=null;currentPage="students";render();return;}
   if(action==="assign-priority"){
@@ -1337,7 +1444,7 @@ async function loadFirebaseStudents() {
       return {
         ...local,id:doc.id,email:profile.email||local?.email||"",
         name:profile.displayName||profile.name||local?.name||profile.email||"Học sinh",
-        role:profile.role,accountStatus:profile.accountStatus||"active",
+        role:profile.role,source:"firebase",accountStatus:profile.accountStatus||"active",
         deleteAfter:profile.deleteAfter?.toDate?.().toISOString?.()||profile.deleteAfter||null
       };
     }).filter(user=>user.role==="student"||user.role==="teacher");
@@ -1345,7 +1452,7 @@ async function loadFirebaseStudents() {
     return true;
   } catch(error) {
     console.error("Could not load Firebase student profiles.",error);
-    data.users=data.users.filter(user=>user.id===session?.id&&user.role==="student");
+    data.users=data.users.filter(user=>user.source==="firebase"||(user.id===session?.id&&user.role==="student"));
     render();
     toast(firebaseFirestoreError(error));
     return false;
@@ -1701,19 +1808,86 @@ function bindQuestionCropEditor(editor) {
   const finish=event=>{if(start){if(stage.hasPointerCapture(event.pointerId))stage.releasePointerCapture(event.pointerId);try { drawQuestionCropPreview(editor,JSON.parse(editor.dataset.cropRect||"null")); } catch {}start=null;origin=null;moveExisting=false;}};
   stage.onpointerup=finish;stage.onpointercancel=finish;
 }
-function normalizeQuestionKey(value,section) {
-  const text=String(value||"").trim();
-  if(!text)return null;
-  if(section==="Đúng / Sai") {
-    const labeled=[...text.matchAll(/(?:^|[\s,;])([a-d])\s*[).:= -]?\s*(đúng|sai|đ|s)\b/gi)];
-    if(labeled.length)return labeled.map(match=>`${match[1].toUpperCase()}:${/^(đúng|đ)$/i.test(match[2])?"Đ":"S"}`).join("|");
-    const sequence=text.match(/^(?:(?:đúng|sai|đ|s)(?:[\s,;/|-]+(?:đúng|sai|đ|s))+)$/i)?.[0];
-    if(sequence)return sequence.split(/[\s,;/|-]+/).map((answer,index)=>`${String.fromCharCode(65+index)}:${/^(đúng|đ)$/i.test(answer)?"Đ":"S"}`).join("|");
+function normalizeMathAnswer(value) {
+  return String(value??"").trim()
+    .replace(/\u00a0/g," ")
+    .replace(/[−–—﹣]/g,"-")
+    .replace(/\\\(|\\\)|\\\[|\\\]|\$/g,"")
+    .replace(/\\(?:left|right)\b/g,"")
+    .replace(/\\(?:dfrac|tfrac|frac)\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g,"($1)/($2)")
+    .replace(/([+-]?)\(([-+]?\d+(?:\.\d+)?)\)\/\(([-+]?\d+(?:\.\d+)?)\)/g,(_,sign,numerator,denominator)=>`${sign}${numerator}/${denominator}`)
+    .replace(/\\(?:cdot|times)\b/g,"*")
+    .replace(/\\div\b/g,"/")
+    .replace(/\\pi\b/g,"π")
+    .replace(/\\sqrt\s*\{([^{}]+)\}/g,"√$1")
+    .replace(/sqrt\(([^()]*)\)/gi,"√$1")
+    .replace(/[{}]/g,"")
+    .replace(/\s+/g,"")
+    .replace(/(\d),(\d)/g,"$1.$2")
+    .toLocaleUpperCase("vi");
+}
+function normalizeNumericAnswer(value) {
+  let text=normalizeMathAnswer(value).replace(/^([+-]?)\./,(_,sign)=>`${sign}0.`).replace(/\.$/,".0");
+  if(!/^[+-]?\d+(?:\.\d+)?(?:\/[+-]?\d+(?:\.\d+)?)?$/.test(text))return null;
+  const decimalRational=part=>{
+    const negative=part.startsWith("-");
+    const unsigned=part.replace(/^[+-]/,"");
+    const [whole,fraction=""]=unsigned.split(".");
+    const denominator=10n**BigInt(fraction.length);
+    let numerator=BigInt(`${whole||"0"}${fraction}`||"0");
+    if(negative)numerator=-numerator;
+    return [numerator,denominator];
+  };
+  const [left,right]=text.split("/");
+  let [numerator,denominator]=decimalRational(left);
+  if(right!==undefined) {
+    const [divisor,divisorScale]=decimalRational(right);
+    if(divisor===0n)return null;
+    numerator*=divisorScale;
+    denominator*=divisor;
   }
-  const option=text.match(/^\s*([A-D])(?:\b|[).])/i)?.[1];
-  if(section==="Trắc nghiệm"&&option)return option.toUpperCase();
-  const numeric=text.match(/[-+]?\d+(?:[.,]\d+)?(?:\s*\/\s*[-+]?\d+(?:[.,]\d+)?)?/);
-  return numeric?.[0].replace(/\s/g,"").replace(",",".")||text;
+  if(denominator<0n){numerator=-numerator;denominator=-denominator;}
+  const gcd=(a,b)=>{a=a<0n?-a:a;b=b<0n?-b:b;while(b){const remainder=a%b;a=b;b=remainder;}return a||1n;};
+  const divisor=gcd(numerator,denominator);
+  return `${numerator/divisor}/${denominator/divisor}`;
+}
+function truthFalseValue(value) {
+  const normalized=String(value??"").trim().toLocaleUpperCase("vi");
+  if(["Đ","ĐÚNG","TRUE","T"].includes(normalized))return "Đ";
+  if(["S","SAI","FALSE","F"].includes(normalized))return "S";
+  return null;
+}
+function canonicalTrueFalse(value) {
+  if(value&&typeof value==="object"&&!Array.isArray(value)) {
+    const pairs=Object.entries(value).map(([label,state])=>[String(label).trim().toLocaleUpperCase("vi"),truthFalseValue(state)])
+      .filter(([label,state])=>/^[A-D]$/.test(label)&&state);
+    return pairs.length?pairs.sort(([left],[right])=>left.localeCompare(right)).map(([label,state])=>`${label}:${state}`).join("|"):null;
+  }
+  const text=String(value??"").trim().replace(/^(?:ĐÁP\s*ÁN|ĐÁP\s*SỐ|KẾT\s*QUẢ)\s*[:：]\s*/i,"").replace(/[.。]+$/g,"");
+  const labeled=[...text.matchAll(/(?:^|[\s,;|/])([A-D])\s*[).:= -]?\s*(đúng|sai|đ|s|true|false|t|f)(?=$|[\s,;|/.])/gi)];
+  if(labeled.length)return [...new Map(labeled.map(match=>[match[1].toLocaleUpperCase("vi"),truthFalseValue(match[2])]))]
+    .sort(([left],[right])=>left.localeCompare(right)).map(([label,state])=>`${label}:${state}`).join("|");
+  const tokens=text.split(/[\s,;|/]+/).filter(Boolean),states=tokens.map(truthFalseValue);
+  if(states.length&&states.every(Boolean))return states.map((state,index)=>`${String.fromCharCode(65+index)}:${state}`).join("|");
+  const single=truthFalseValue(text);
+  return single?`A:${single}`:null;
+}
+function normalizeQuestionKey(value,section) {
+  let text=String(value??"").trim();
+  if(!text)return null;
+  text=text.replace(/^(?:ĐÁP\s*ÁN|ĐÁP\s*SỐ|KẾT\s*QUẢ)\s*[:：]\s*/i,"");
+  const formatted=normalizeMathAnswer(text);
+  if(section==="Đúng / Sai")return canonicalTrueFalse(text)||formatted;
+  if(section==="Trắc nghiệm") {
+    const option=formatted.match(/^([A-D])(?:[).:]|$)/)?.[1];
+    if(option)return option;
+  }
+  if(section==="Trả lời ngắn") {
+    const equation=formatted.match(/^[A-Z]\s*=\s*(.+)$/);
+    if(equation)text=equation[1];
+    return normalizeMathAnswer(text);
+  }
+  return formatted;
 }
 async function parseDocument(file,{analyzeQuestions=true}={}) {
   const extension=file.name.split(".").pop().toLowerCase();
@@ -2278,16 +2452,12 @@ function inferAnswerKey(text,section,choices) {
   const explicit=text.match(/(?:đáp\s*án|đáp\s*số|kết\s*quả)\s*[:：]\s*([^\n]+)/i)?.[1]?.trim()
     ||text.match(/(?:^|\n)\s*(?:[a-d]\s*[).:]\s*(?:đúng|sai|đ|s)\s*[,;]?[\s]*){2,}/i)?.[0]?.trim();
   if(!explicit)return null;
-  if(section==="Đúng / Sai") {
-    const answers=[...explicit.matchAll(/(?:^|[\s,;])([a-d])\s*[).:= -]?\s*(đúng|sai|đ|s)\b/gi)];
-    if(answers.length)return answers.map(match=>`${match[1].toUpperCase()}:${/^(đúng|đ)$/i.test(match[2])?"Đ":"S"}`).join("|");
-    const sequence=explicit.match(/^(?:(?:đúng|sai|đ|s)(?:[\s,;/|-]+(?:đúng|sai|đ|s))+)$/i)?.[0];
-    if(sequence)return sequence.split(/[\s,;/|-]+/).map((value,index)=>`${String.fromCharCode(65+index)}:${/^(đúng|đ)$/i.test(value)?"Đ":"S"}`).join("|");
+  const key=normalizeQuestionKey(explicit,section);
+  if(section==="Trắc nghiệm") {
+    const option=key?.match(/^([A-D])$/)?.[1];
+    return option&&choices.some(choice=>choice.label===option)?option:null;
   }
-  const option=explicit.match(/^\s*([A-D])(?:\b|[).])/i)?.[1]?.toUpperCase();
-  if(option&&choices.some(choice=>choice.label===option))return option;
-  const numeric=explicit.match(/[-+]?\d+(?:[.,]\d+)?(?:\s*\/\s*[-+]?\d+(?:[.,]\d+)?)?/);
-  return numeric?.[0].replace(/\s/g,"").replace(",",".")||null;
+  return key||null;
 }
 function inferErrorCode(text) {
   const normalized=normalizeVietnamese(text);
@@ -2758,13 +2928,13 @@ function submitPractice() {
 }
 function finishExam() {
   if(!currentPractice)return;
-  const graded=currentPractice.questions.filter(q=>q.answerKey);
-  const correct=graded.filter(q=>normalizeAnswer(currentPractice.answers[q.id])===normalizeAnswer(q.answerKey)).length;
+  const graded=currentPractice.questions.filter(hasAnswerKey);
+  const correct=graded.filter(q=>answersMatch(currentPractice.answers[q.id],q.answerKey,q.section)).length;
   const total=currentPractice.questions.length;
   const score=graded.length?Math.round((correct/graded.length)*100)/10:null;
-  const answeredUnknown=currentPractice.questions.filter(q=>!q.answerKey&&currentPractice.answers[q.id]).length;
+  const answeredUnknown=currentPractice.questions.filter(q=>!hasAnswerKey(q)&&currentPractice.answers[q.id]).length;
   const reviewQuestions=currentPractice.questions.map((question,index)=>{
-    const answerKey=question.answerKey?String(question.answerKey):null,userAnswer=currentPractice.answers[question.id]??null,errorIndex=errorIndexForCode(question.errorId);
+    const answerKey=hasAnswerKey(question)?String(question.answerKey):null,userAnswer=currentPractice.answers[question.id]??null,errorIndex=errorIndexForCode(question.errorId);
     return {
       ordinal:index+1,
       questionId:String(question.id||`question-${index+1}`).slice(0,160),
@@ -2778,19 +2948,46 @@ function finishExam() {
       choices:question.sourceImageOnly?[]:(question.choices||[]).map(choice=>({label:String(choice.label||"").slice(0,8),html:String(choice.html||""),text:String(choice.text||"")})),
       answerKey,
       userAnswer,
-      isCorrect:answerKey?normalizeAnswer(userAnswer)===normalizeAnswer(answerKey):null,
+      isCorrect:answerKey!==null?answersMatch(userAnswer,answerKey,question.section):null,
       questionTime:Math.max(0,Math.floor(Number(currentPractice.questionTimes?.[question.id])||0))
     };
   });
-  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map((_,index)=>currentPractice.questions.filter(q=>questionMatchesErrorIndex(q,index)&&q.answerKey&&normalizeAnswer(currentPractice.answers[q.id])!==normalizeAnswer(q.answerKey)).length),questionTimes:{...currentPractice.questionTimes},reviewQuestions};
-  data.attempts.push(attempt);saveData();currentPractice=null;currentPage="progress";render();
-  if(session?.source==="firebase")void saveFirebaseAttempt(attempt).catch(error=>{console.error("Could not sync completed attempt.",error);toast("Đã lưu lượt làm trên thiết bị; hệ thống sẽ đồng bộ lại khi có mạng.")});
+  const attempt={id:`attempt-${crypto.randomUUID?.()||Date.now()}`,userId:session.id,title:currentPractice.title,source:currentPractice.source==="personal"?"personal":"teacher",score,correct,total,graded:graded.length,duration:Math.round((Date.now()-currentPractice.startedAt)/1000),createdAt:new Date().toISOString(),mistakes:errors.map((_,index)=>currentPractice.questions.filter(q=>questionMatchesErrorIndex(q,index)&&hasAnswerKey(q)&&!answersMatch(currentPractice.answers[q.id],q.answerKey,q.section)).length),questionTimes:{...currentPractice.questionTimes},reviewQuestions,reviewQuestionCount:reviewQuestions.length};
+  data.attempts.push(attempt);
+  const cloudSave=session?.source==="firebase"?trackFirebaseAttemptSave(attempt):null;
+  saveData();currentPractice=null;currentPage="progress";render();
+  if(cloudSave)void cloudSave.catch(error=>{console.error("Could not sync completed attempt.",error);toast("Bài làm đã ghi nhận trên thiết bị nhưng chưa đồng bộ đủ lên máy chủ. Hãy giữ trang này mở và kiểm tra kết nối mạng.")});
   showModal("Hoàn thành bài ôn tập",`<div style="text-align:center;padding:12px"><div class="stat-icon purple" style="width:58px;height:58px;border-radius:18px;margin:auto">${icon("spark")}</div><h1 style="font-size:31px;margin-top:14px">${score===null?"Chưa chấm":`${score}/10`}</h1><p class="subhead">${score===null?`Lượt làm đã được ghi nhận. ${total} câu chưa có đáp án để chấm tự động.`:`Bạn trả lời đúng ${correct}/${graded.length} câu đã có đáp án.`} ${answeredUnknown?`${answeredUnknown} câu chưa có đáp án đúng để đối chiếu. `:""}Thời gian: ${formatDuration(attempt.duration)}.</p></div>`,`<button class="btn" data-action="close-modal">Xem lộ trình</button>`);
 }
 function normalizeAnswer(value) {
-  if(value&&typeof value==="object")return Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>`${key}:${item}`).join("|").toUpperCase();
-  if(Array.isArray(value))return value.slice().sort().join("").toUpperCase();
-  return String(value??"").trim().replace(/\s+/g,"").replace(/(\d),(\d)/g,"$1.$2").toUpperCase();
+  return normalizeAnswerForSection(value,"");
+}
+function normalizeAnswerForSection(value,section) {
+  if(section==="Đúng / Sai") {
+    const trueFalse=canonicalTrueFalse(value);
+    if(trueFalse)return trueFalse;
+  }
+  if(value&&typeof value==="object") {
+    if(Array.isArray(value))return value.map(item=>normalizeMathAnswer(item)).sort().join("|");
+    return Object.entries(value).sort(([left],[right])=>left.localeCompare(right)).map(([key,item])=>`${normalizeMathAnswer(key)}:${normalizeMathAnswer(item)}`).join("|");
+  }
+  let text=normalizeMathAnswer(value).replace(/^(?:ĐÁP\s*ÁN|ĐÁP\s*SỐ|KẾT\s*QUẢ)[:：]/,"");
+  if(section==="Trắc nghiệm") {
+    const option=text.match(/^([A-D])(?:[).:]|$)/)?.[1];
+    if(option)return option;
+  }
+  if(section==="Trả lời ngắn")return normalizeNumericAnswer(text)||text;
+  return text;
+}
+function hasAnswerKey(question) {
+  return question?.answerKey!==null&&question?.answerKey!==undefined&&String(question.answerKey).trim()!=="";
+}
+function answersMatch(userAnswer,answerKey,section) {
+  return normalizeAnswerForSection(userAnswer,section)===normalizeAnswerForSection(answerKey,section);
+}
+function questionCorrectness(question) {
+  if(!hasAnswerKey(question))return null;
+  return answersMatch(question.userAnswer,question.answerKey,question.section);
 }
 window.addEventListener("online",()=>{
   if(session?.source==="firebase")void loadFirebaseAttempts();

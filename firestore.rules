@@ -140,11 +140,11 @@ service cloud.firestore {
         && request.resource.data.id == attemptId
         && request.resource.data.keys().hasAll([
           "id", "userId", "title", "source", "score", "correct", "total",
-          "graded", "duration", "createdAt", "mistakes", "questionTimes"
+          "graded", "duration", "createdAt", "reviewQuestionCount", "mistakes", "questionTimes"
         ])
         && request.resource.data.keys().hasOnly([
           "id", "userId", "title", "source", "score", "correct", "total",
-          "graded", "duration", "createdAt", "mistakes", "questionTimes"
+          "graded", "duration", "createdAt", "reviewQuestionCount", "mistakes", "questionTimes"
         ])
         && request.resource.data.title is string
         && request.resource.data.title.size() <= 500
@@ -155,6 +155,9 @@ service cloud.firestore {
         && request.resource.data.total is int
         && request.resource.data.graded is int
         && request.resource.data.duration is int
+        && request.resource.data.reviewQuestionCount is int
+        && request.resource.data.reviewQuestionCount >= 0
+        && request.resource.data.reviewQuestionCount <= request.resource.data.total
         && request.resource.data.correct >= 0
         && request.resource.data.graded >= request.resource.data.correct
         && request.resource.data.total >= request.resource.data.graded
