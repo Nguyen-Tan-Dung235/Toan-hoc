@@ -326,10 +326,57 @@ async function configureFirebaseFunctions() {
   firebaseFunctions=firebaseFunctionsSdk.getFunctions(firebaseAuth.app);
   return firebaseFunctions;
 }
-async function purgeFirebaseDataForMissingProfile() {
+async function deleteFirebaseDocuments(documents) {
+  for(let index=0;index<documents.length;index+=400) {
+    const batch=firebaseSdk.writeBatch(firebaseDb);
+    for(const document of documents.slice(index,index+400))batch.delete(document.ref);
+    await firebaseRequest(batch.commit());
+  }
+}
+async function deleteFirebaseChildCollection(parentRef,collectionName) {
+  const children=await firebaseRequest(firebaseSdk.getDocs(firebaseSdk.collection(parentRef,collectionName)));
+  await deleteFirebaseDocuments(children.docs);
+}
+async function purgeFirebaseDataInClient(userId) {
+  await configureFirestore();
+  const collections=["attempts","errorDocs","questionSets","assignments"].map(name=>firebaseSdk.collection(firebaseDb,name));
+  const [attempts,errorDocs,questionSets,teacherAssignments,studentAssignments]=await Promise.all([
+    firebaseSdk.query(collections[0],firebaseSdk.where("userId","==",userId)),
+    firebaseSdk.query(collections[1],firebaseSdk.where("teacherId","==",userId)),
+    firebaseSdk.query(collections[2],firebaseSdk.where("teacherId","==",userId)),
+    firebaseSdk.query(collections[3],firebaseSdk.where("teacherId","==",userId)),
+    firebaseSdk.query(collections[3],firebaseSdk.where("studentIds","array-contains",userId))
+  ].map(query=>firebaseRequest(firebaseSdk.getDocs(query))));
+  const ownedAssignmentIds=new Set(teacherAssignments.docs.map(document=>document.id));
+  await Promise.all([
+    ...attempts.docs.map(async document=>{
+      await deleteFirebaseChildCollection(document.ref,"questions");
+      await deleteFirebaseDocuments([document]);
+    }),
+    ...questionSets.docs.map(async document=>{
+      await Promise.all(["questions","sourcePages"].map(name=>deleteFirebaseChildCollection(document.ref,name)));
+      await deleteFirebaseDocuments([document]);
+    }),
+    ...teacherAssignments.docs.map(async document=>{
+      await deleteFirebaseChildCollection(document.ref,"questions");
+      await deleteFirebaseDocuments([document]);
+    }),
+    deleteFirebaseDocuments(errorDocs.docs),
+    ...studentAssignments.docs.filter(document=>!ownedAssignmentIds.has(document.id)).map(document=>{
+      const studentIds=(document.data().studentIds||[]).filter(studentId=>studentId!==userId);
+      return firebaseRequest(firebaseSdk.updateDoc(document.ref,{studentIds,students:studentIds.length}));
+    })
+  ]);
+}
+async function purgeFirebaseDataForMissingProfile(userId) {
   const functions=await configureFirebaseFunctions();
   const purge=firebaseSdk.httpsCallable(functions,"purgeDataForMissingProfile",{timeout:540000});
-  await purge();
+  try { await purge(); }
+  catch(error) {
+    if(error.code==="functions/not-found")console.info("Firebase account cleanup function is not deployed; using secure client cleanup.");
+    else console.warn("Firebase account cleanup function is unavailable; using secure client cleanup.",error);
+    await purgeFirebaseDataInClient(userId);
+  }
 }
 async function firebaseProfile(user,{createStudentProfile=false}={}) {
   await configureFirestore();
@@ -339,7 +386,7 @@ async function firebaseProfile(user,{createStudentProfile=false}={}) {
   catch(error) { throw firebaseProfileError(error); }
   if(!profile.exists()) {
     clearFirebaseLocalAccountData(user.uid);
-    await purgeFirebaseDataForMissingProfile();
+    await purgeFirebaseDataForMissingProfile(user.uid);
     try { profile=await firebaseRequest(firebaseSdk.getDoc(profileRef)); }
     catch(error) { throw firebaseProfileError(error); }
   }

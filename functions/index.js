@@ -3,7 +3,6 @@
 const {initializeApp} = require("firebase-admin/app");
 const {getAuth} = require("firebase-admin/auth");
 const {FieldValue, Timestamp, getFirestore} = require("firebase-admin/firestore");
-const {getStorage} = require("firebase-admin/storage");
 const functionsV1 = require("firebase-functions/v1");
 const {onCall, HttpsError} = require("firebase-functions/v2/https");
 const {onDocumentDeleted} = require("firebase-functions/v2/firestore");
@@ -54,10 +53,7 @@ async function purgeDeletedAccountData(uid, {deleteProfile = false} = {}) {
     ...questionSets.docs.map((document) => document.ref),
     ...teacherAssignments.docs.map((document) => document.ref),
   ];
-  await Promise.all([
-    ...recursivelyDeleted.map((reference) => db.recursiveDelete(reference)),
-    getStorage().bucket().deleteFiles({prefix: `question-set-assets/${uid}/`}),
-  ]);
+  await Promise.all(recursivelyDeleted.map((reference) => db.recursiveDelete(reference)));
   await Promise.all(studentAssignments.docs
     .filter((document) => !ownedAssignmentIds.has(document.id))
     .map((document) => {

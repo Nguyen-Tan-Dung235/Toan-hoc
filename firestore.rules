@@ -4,6 +4,10 @@ service cloud.firestore {
     function signedIn() {
       return request.auth != null;
     }
+    function deletedProfile() {
+      return signedIn()
+        && !exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
     function staff() {
       return signedIn()
         && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ["teacher", "owner"];
@@ -88,6 +92,10 @@ service cloud.firestore {
       allow read: if signedIn() && (
         (staff() && resource.data.teacherId == request.auth.uid)
         || (activeStudent() && request.auth.uid in resource.data.studentIds)
+        || (deletedProfile() && (
+          resource.data.teacherId == request.auth.uid
+          || request.auth.uid in resource.data.studentIds
+        ))
       );
       allow create: if staff()
         && request.resource.data.teacherId == request.auth.uid
@@ -113,8 +121,17 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly([
           "id", "teacherId", "studentIds", "title", "questions", "students",
           "due", "state", "sections", "exam", "createdAt"
-        ]);
-      allow delete: if staff() && resource.data.teacherId == request.auth.uid;
+        ]) || (
+          deletedProfile()
+          && request.auth.uid in resource.data.studentIds
+          && request.resource.data.teacherId == resource.data.teacherId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["studentIds", "students"])
+          && request.resource.data.studentIds is list
+          && request.resource.data.studentIds.toSet()
+            == resource.data.studentIds.toSet().difference([request.auth.uid].toSet())
+          && request.resource.data.students == request.resource.data.studentIds.size()
+        );
+      allow delete: if (staff() || deletedProfile()) && resource.data.teacherId == request.auth.uid;
 
       match /questions/{questionId} {
         function assignment() {
@@ -123,17 +140,20 @@ service cloud.firestore {
         allow read: if signedIn() && exists(/databases/$(database)/documents/assignments/$(assignmentId)) && (
           (staff() && assignment().data.teacherId == request.auth.uid)
           || (activeStudent() && request.auth.uid in assignment().data.studentIds)
+          || (deletedProfile() && assignment().data.teacherId == request.auth.uid)
         );
         allow create: if staff() && request.resource.data.teacherId == request.auth.uid;
         allow update: if staff() && exists(/databases/$(database)/documents/assignments/$(assignmentId))
           && assignment().data.teacherId == request.auth.uid
           && request.resource.data.teacherId == request.auth.uid;
-        allow delete: if staff() && exists(/databases/$(database)/documents/assignments/$(assignmentId))
+        allow delete: if (staff() || deletedProfile())
+          && exists(/databases/$(database)/documents/assignments/$(assignmentId))
           && assignment().data.teacherId == request.auth.uid;
       }
     }
     match /attempts/{attemptId} {
-      allow read: if signedIn() && (staff() || (activeStudent() && resource.data.userId == request.auth.uid));
+      allow read: if signedIn() && (staff()
+        || ((activeStudent() || deletedProfile()) && resource.data.userId == request.auth.uid));
       allow create: if signedIn()
         && activeStudent()
         && request.resource.data.userId == request.auth.uid
@@ -169,7 +189,7 @@ service cloud.firestore {
       allow update: if activeStudent()
         && resource.data.userId == request.auth.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([]);
-      allow delete: if false;
+      allow delete: if deletedProfile() && resource.data.userId == request.auth.uid;
 
       match /questions/{reviewQuestionId} {
         function parentAttempt() {
@@ -180,7 +200,8 @@ service cloud.firestore {
         }
         allow read: if signedIn()
           && exists(/databases/$(database)/documents/attempts/$(attemptId))
-          && (staff() || (activeStudent() && parentAttempt().data.userId == request.auth.uid));
+          && (staff() || ((activeStudent() || deletedProfile())
+            && parentAttempt().data.userId == request.auth.uid));
         allow create: if activeStudent()
           && existsAfter(/databases/$(database)/documents/attempts/$(attemptId))
           && parentAttemptAfter().data.userId == request.auth.uid
@@ -227,12 +248,17 @@ service cloud.firestore {
           && (request.resource.data.isCorrect == null || request.resource.data.isCorrect is bool)
           && request.resource.data.questionTime is int
           && request.resource.data.questionTime >= 0;
-        allow update, delete: if false;
+        allow update: if false;
+        allow delete: if deletedProfile()
+          && exists(/databases/$(database)/documents/attempts/$(attemptId))
+          && parentAttempt().data.userId == request.auth.uid;
       }
     }
     match /questionSets/{setId} {
       allow read: if signedIn() && (
-        staff() || (activeStudent() && resource.data.status == "published" && resource.data.hiddenFromStudents == false)
+        staff()
+        || (activeStudent() && resource.data.status == "published" && resource.data.hiddenFromStudents == false)
+        || (deletedProfile() && resource.data.teacherId == request.auth.uid)
       );
       allow create: if staff()
         && request.resource.data.teacherId == request.auth.uid
@@ -261,14 +287,16 @@ service cloud.firestore {
           && request.resource.data.sections is list
           && request.resource.data.sections.size() <= 3)
       );
-      allow delete: if staff();
+      allow delete: if staff() || (deletedProfile() && resource.data.teacherId == request.auth.uid);
 
       match /questions/{questionId} {
         function questionSet() {
           return get(/databases/$(database)/documents/questionSets/$(setId));
         }
         allow read: if signedIn() && exists(/databases/$(database)/documents/questionSets/$(setId)) && (
-          staff() || (activeStudent() && questionSet().data.status == "published" && questionSet().data.hiddenFromStudents == false)
+          staff()
+          || (activeStudent() && questionSet().data.status == "published" && questionSet().data.hiddenFromStudents == false)
+          || (deletedProfile() && questionSet().data.teacherId == request.auth.uid)
         );
         allow create: if staff()
           && exists(/databases/$(database)/documents/questionSets/$(setId))
@@ -277,14 +305,16 @@ service cloud.firestore {
         allow update: if staff()
           && exists(/databases/$(database)/documents/questionSets/$(setId))
           && questionSet().data.status == "published";
-        allow delete: if staff()
-          && exists(/databases/$(database)/documents/questionSets/$(setId));
+        allow delete: if exists(/databases/$(database)/documents/questionSets/$(setId))
+          && (staff() || (deletedProfile() && questionSet().data.teacherId == request.auth.uid));
       }
       match /sourcePages/{pageId} {
         function questionSet() {
           return get(/databases/$(database)/documents/questionSets/$(setId));
         }
-        allow read: if staff() && exists(/databases/$(database)/documents/questionSets/$(setId));
+        allow read: if (staff() || (deletedProfile()
+          && exists(/databases/$(database)/documents/questionSets/$(setId))
+          && questionSet().data.teacherId == request.auth.uid));
         allow create: if staff()
           && exists(/databases/$(database)/documents/questionSets/$(setId))
           && questionSet().data.teacherId == request.auth.uid
@@ -294,12 +324,12 @@ service cloud.firestore {
           && request.resource.data.image is string
           && request.resource.data.image.size() <= 1000000;
         allow update: if false;
-        allow delete: if staff()
-          && exists(/databases/$(database)/documents/questionSets/$(setId));
+        allow delete: if exists(/databases/$(database)/documents/questionSets/$(setId))
+          && (staff() || (deletedProfile() && questionSet().data.teacherId == request.auth.uid));
       }
     }
     match /errorDocs/{errorDocId} {
-      allow read: if staff() && resource.data.teacherId == request.auth.uid;
+      allow read: if (staff() || deletedProfile()) && resource.data.teacherId == request.auth.uid;
       function validErrorDoc() {
         return request.resource.data.keys().hasAll(["id", "teacherId", "name", "summary", "text", "createdAt"])
           && request.resource.data.keys().hasOnly(["id", "teacherId", "name", "summary", "text", "createdAt"])
@@ -319,7 +349,7 @@ service cloud.firestore {
       allow create: if staff() && validErrorDoc();
       allow update: if staff() && resource.data.teacherId == request.auth.uid
         && request.resource.data.teacherId == resource.data.teacherId && validErrorDoc();
-      allow delete: if staff() && resource.data.teacherId == request.auth.uid;
+      allow delete: if (staff() || deletedProfile()) && resource.data.teacherId == request.auth.uid;
     }
   }
 }
