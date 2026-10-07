@@ -469,10 +469,10 @@ async function saveFirebaseAttempt(attempt,userId=session?.id) {
   await configureFirestore();
   const payload=firebaseAttemptPayload(attempt,userId);
   const ref=firebaseSdk.doc(firebaseDb,"attempts",payload.id);
-  const existing=await firebaseRequest(firebaseSdk.getDoc(ref));
-  if(!existing.exists())await firebaseRequest(firebaseSdk.setDoc(ref,payload));
-  const hasInlineReview=existing.exists()&&Array.isArray(existing.data()?.reviewQuestions);
-  if(!hasInlineReview&&Array.isArray(attempt.reviewQuestions)&&attempt.reviewQuestions.length) {
+  // A student cannot read a not-yet-created attempt under owner-only read rules.
+  // Write directly; rules permit only an identical retry if the parent already exists.
+  await firebaseRequest(firebaseSdk.setDoc(ref,payload));
+  if(Array.isArray(attempt.reviewQuestions)&&attempt.reviewQuestions.length) {
     const reviewCollection=firebaseSdk.collection(ref,"questions");
     const saved=await firebaseRequest(firebaseSdk.getDocs(reviewCollection));
     const savedIds=new Set(saved.docs.map(document=>document.id));
@@ -653,11 +653,11 @@ function render() {
   if(!session) { root.innerHTML=loginView(); bindLogin(); showLoginNotice(); return; }
   if(!isTeacher() && ["students","errors","teacher-exams"].includes(currentPage)) currentPage="home";
   root.innerHTML=`
-    <div class="shell${currentPage==="home"?" home-shell":""}">
+    <div class="shell">
       ${sidebar()}
       <main class="main">
         <header class="topbar">
-          <div class="breadcrumb"><button class="icon-button mobile-menu" data-action="menu">${icon("menu")}</button>${currentPage==="home"?" Không gian học tập":` <button class="breadcrumb-home" data-page="home">← Trang chủ</button>`} <span> / </span> <b>${pageTitle()}</b></div>
+          <div class="breadcrumb"><button class="icon-button mobile-menu" data-action="menu">${icon("menu")}</button> Không gian học tập <span> / </span> <b>${pageTitle()}</b></div>
           <div class="top-actions"><div class="search">${icon("search")}<input id="global-search" placeholder="Tìm kiếm..." /></div><button class="icon-button" title="Thông báo">${icon("bell")}<i class="notification-dot"></i></button></div>
         </header>
         ${pageView()}

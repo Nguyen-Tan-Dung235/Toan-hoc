@@ -719,11 +719,11 @@ th { color:#648298;background:#f4faff; }
   .modal-attempt-review { width:calc(100vw - 12px);height:calc(100dvh - 12px);max-height:calc(100dvh - 12px);padding:13px; }
 }
 
-/* The complete left navigation stays pinned on the home dashboard only. */
-.home-shell > .sidebar {
+/* Keep navigation pinned across sections; focus views replace the application shell. */
+.shell > .sidebar {
   position:fixed;
   inset:0 auto 0 0;
-  z-index:15;
+  z-index:8;
   width:255px;
   height:100vh;
   height:100dvh;
@@ -731,30 +731,20 @@ th { color:#648298;background:#f4faff; }
   overflow-y:auto;
   overscroll-behavior:contain;
 }
-.home-shell > .main { margin-left:255px; }
-.shell:not(.home-shell) > .sidebar { display:none; }
-.shell:not(.home-shell) .mobile-menu { display:none; }
-.breadcrumb-home {
-  border:0;
-  padding:0;
-  background:transparent;
-  color:#167fc3;
-  font-size:inherit;
-  font-weight:700;
-}
-.breadcrumb-home:hover { color:#095e99;text-decoration:underline; }
+.shell > .main { margin-left:255px; }
+body:has(.modal-review, .modal-attempt-review) .sidebar { visibility:hidden; }
 @media(max-width:1120px) {
-  .home-shell > .sidebar { width:238px;flex-basis:238px; }
-  .home-shell > .main { margin-left:238px; }
+  .shell > .sidebar { width:238px;flex-basis:238px; }
+  .shell > .main { margin-left:238px; }
 }
 @media(max-width:780px) {
-  .home-shell > .sidebar {
+  .shell > .sidebar {
     display:none;
     width:min(285px,86vw);
     height:100dvh;
     inset:0 auto 0 0;
     overflow-y:auto;
   }
-  .home-shell > .sidebar.show-mobile { display:flex; }
-  .home-shell > .main { margin-left:0; }
+  .shell > .sidebar.show-mobile { display:flex; }
+  .shell > .main { margin-left:0; }
 }
