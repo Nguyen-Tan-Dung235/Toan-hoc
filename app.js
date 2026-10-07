@@ -78,6 +78,8 @@ let attemptUnsubscribe = null;
 let attemptSyncGeneration = 0;
 let attemptHistoryState = "idle";
 let attemptHistoryError = "";
+let studentDirectoryState = "idle";
+let studentDirectoryError = "";
 const pendingAttemptWrites = new Map();
 let profileUnsubscribe = null;
 let profileSyncGeneration = 0;
@@ -101,7 +103,7 @@ let passwordResetTimer = null;
 function loadData() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
-    if (saved) return {...sample,...saved,users: saved.users?.length ? saved.users : sample.users};
+    if (saved) return {...sample,...saved,users:Array.isArray(saved.users)?saved.users:sample.users};
   } catch (error) { console.warn("Không đọc được dữ liệu đã lưu.", error); }
   return structuredClone(sample);
 }
@@ -145,6 +147,7 @@ function persistLegacyErrorDocs() {
 function setSession(user) {
   const identityChanged=!user||session?.id!==user.id||session?.source!==user.source;
   if(identityChanged){attemptHistoryState=user?.source==="firebase"?"loading":"idle";attemptHistoryError="";}
+  if(identityChanged){studentDirectoryState=user?.source==="firebase"&&(user.role==="teacher"||user.role==="owner")?"loading":"idle";studentDirectoryError="";}
   const oldLocalErrorDocs=identityChanged&&user?.source==="firebase"&&session?.source!=="firebase"?data.errorDocs||[]:[];
   if(oldLocalErrorDocs.length) {
     legacyErrorDocs=mergeLegacyErrorDocs(legacyErrorDocs,data.errorDocs);
@@ -501,9 +504,23 @@ function trackFirebaseAttemptSave(attempt,userId=session?.id) {
   return promise;
 }
 function sortAttempts(attempts) {
-  return attempts.slice().sort((a,b)=>Date.parse(a.createdAt||"")-Date.parse(b.createdAt||"")||String(a.id).localeCompare(String(b.id)));
+  return attempts.slice().sort((a,b)=>attemptTimestampMillis(a.createdAt)-attemptTimestampMillis(b.createdAt)||String(a.id).localeCompare(String(b.id)));
 }
-async function loadFirebaseAttempts() {
+function attemptTimestampMillis(value) {
+  if(value&&typeof value.toMillis==="function")return value.toMillis();
+  const parsed=value instanceof Date?value:new Date(value||"");
+  const timestamp=parsed.getTime();
+  return Number.isFinite(timestamp)?timestamp:0;
+}
+function formatAttemptTimestamp(value) {
+  const timestamp=attemptTimestampMillis(value);
+  if(!timestamp)return "Không rõ thời điểm";
+  return new Intl.DateTimeFormat("vi-VN",{
+    timeZone:"Asia/Ho_Chi_Minh",day:"2-digit",month:"2-digit",year:"numeric",
+    hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"
+  }).format(new Date(timestamp));
+}
+async function loadFirebaseAttempts({forceServer=false}={}) {
   if(!session?.id||session.source!=="firebase")return false;
   const userId=session.id,staffView=isTeacher(),generation=++attemptSyncGeneration;
   attemptHistoryState="loading";
@@ -536,7 +553,9 @@ async function loadFirebaseAttempts() {
       saveData();
       if(!currentPractice&&!document.querySelector(".modal-backdrop"))render();
     };
-    const firstSnapshot=await firebaseRequest(firebaseSdk.getDocs(query));
+    const firstSnapshot=await firebaseRequest(forceServer&&firebaseSdk.getDocsFromServer
+      ?firebaseSdk.getDocsFromServer(query)
+      :firebaseSdk.getDocs(query));
     if(generation!==attemptSyncGeneration||session?.id!==userId)return false;
     applySnapshot(firstSnapshot);
     let hasFreshServerSnapshot=!firstSnapshot.metadata?.fromCache;
@@ -984,7 +1003,7 @@ function personalPracticeEvaluation(attempts) {
   }).join("");
   const previousSeries=previousValues?`<polygon class="radar-series radar-series-previous" points="${radarPolygon(previousValues,cx,cy,radius,maximum)}"/>${previousValues.map((value,index)=>{const angle=-Math.PI/2+index*2*Math.PI/errors.length,distance=radius*value/maximum;return `<circle class="radar-point radar-point-previous" cx="${cx+Math.cos(angle)*distance}" cy="${cy+Math.sin(angle)*distance}" r="3.5"/>`;}).join("")}`:"";
   const currentSeries=`<polygon class="radar-series radar-series-current" points="${radarPolygon(values,cx,cy,radius,maximum)}"/>${values.map((value,index)=>{const angle=-Math.PI/2+index*2*Math.PI/errors.length,distance=radius*value/maximum;return `<circle class="radar-point radar-point-current" cx="${cx+Math.cos(angle)*distance}" cy="${cy+Math.sin(angle)*distance}" r="4.5"/>`;}).join("")}`;
-  const label=current=>`${safe(current.title)} · ${new Date(current.createdAt).toLocaleDateString("vi-VN")}`;
+  const label=current=>`${safe(current.title)} · ${formatAttemptTimestamp(current.createdAt)}`;
   const changes=errors.map((category,index)=>{
     const delta=previousValues?values[index]-previousValues[index]:null;
     const status=delta===null?"first":delta>0?"up":delta<0?"down":"same";
@@ -993,11 +1012,25 @@ function personalPracticeEvaluation(attempts) {
   }).join("");
   return `<section class="card section-card practice-evaluation"><div class="section-heading"><div><h2>Đánh giá lỗi qua đề tự luyện</h2><p>Số câu sai của đề mới nhất so với đề trước đó · Không cộng dồn.</p></div><span class="practice-analysis-tag">${personal.length} đề đã làm</span></div><div class="practice-evaluation-grid"><div class="practice-radar-wrap"><div class="practice-radar-caption"><strong>${label(current)}</strong><span>${previous?`So với: ${label(previous)}`:"Đây là mốc tự luyện đầu tiên"}</span></div><svg class="practice-radar" viewBox="0 0 860 500" role="img" aria-label="Biểu đồ mạng nhện so sánh số câu sai theo bảy nhóm kiến thức có tên đầy đủ"><title>So sánh số câu sai theo nhóm kiến thức</title>${rings}${axes}${previousSeries}${currentSeries}</svg><div class="practice-radar-legend"><span><i class="radar-legend-dot current"></i>Đề mới nhất</span>${previous?'<span><i class="radar-legend-dot previous"></i>Đề trước đó</span>':""}</div></div><div class="practice-change-panel"><div class="practice-change-heading"><strong>Thay đổi theo nhóm</strong><span>${previous?"So với lần trước":"Mốc ban đầu"}</span></div><div class="practice-change-list">${changes}</div><div class="practice-change-footnote">↑ Tăng số câu sai <span>·</span> ↓ Giảm số câu sai</div></div></div></section>`;
 }
+function teacherProgressStatus() {
+  if(!isTeacher())return "";
+  const studentCount=data.users.filter(user=>user.role==="student").length;
+  const personalCount=data.attempts.filter(attempt=>attempt.source==="personal").length;
+  if(studentDirectoryState==="loading"||attemptHistoryState==="loading") {
+    return `<div class="notice" role="status">Đang đồng bộ danh sách học sinh và lịch sử tự luyện từ máy chủ…</div>`;
+  }
+  if(studentDirectoryState==="error"||attemptHistoryState==="error") {
+    const errorsFound=[studentDirectoryState==="error"?`Danh sách học sinh: ${studentDirectoryError}`:"",attemptHistoryState==="error"?`Lịch sử bài làm: ${attemptHistoryError}`:""].filter(Boolean).join(" · ");
+    return `<div class="notice" role="alert">Dữ liệu tiến độ chưa tải đủ. ${safe(errorsFound)} <button class="text-button" type="button" data-action="refresh-teacher-progress">Thử đồng bộ lại</button></div>`;
+  }
+  return `<div class="notice" role="status">Đã đồng bộ ${studentCount} học sinh · ${personalCount} lượt tự luyện từ Firebase. <button class="text-button" type="button" data-action="refresh-teacher-progress">Làm mới dữ liệu</button></div>`;
+}
 function teacherHome() {
   const students=data.users.filter(u=>u.role==="student"),allAttempts=sortAttempts(data.attempts),scored=allAttempts.filter(attempt=>Number.isFinite(attempt.score)),average=avg(scored.map(attempt=>attempt.score)),recent=data.assignments.slice(0,3),activities=allAttempts.slice(-3).reverse();
   const dateLabel=new Date().toLocaleDateString("vi-VN",{day:"2-digit",month:"long",year:"numeric"});
-  const timesAgo=value=>{const seconds=Math.max(0,Math.floor((Date.now()-Date.parse(value||""))/1000));if(!Number.isFinite(seconds))return "Vừa cập nhật";if(seconds<60)return "Vừa xong";if(seconds<3600)return `${Math.floor(seconds/60)} phút trước`;if(seconds<86400)return `${Math.floor(seconds/3600)} giờ trước`;return new Date(value).toLocaleDateString("vi-VN")};
+  const timesAgo=value=>{const seconds=Math.max(0,Math.floor((Date.now()-attemptTimestampMillis(value))/1000));if(!attemptTimestampMillis(value))return "Không rõ thời điểm";if(seconds<60)return "Vừa xong";if(seconds<3600)return `${Math.floor(seconds/60)} phút trước`;if(seconds<86400)return `${Math.floor(seconds/3600)} giờ trước`;return formatAttemptTimestamp(value)};
   return `${welcome(`Chào ${safe(userName())} 👋`,"Cùng xem tình hình học tập và giúp học sinh tiến bộ hơn nhé.",`<button class="date-chip">${icon("calendar")} ${dateLabel}</button>`)}
+  ${teacherProgressStatus()}
   <div class="grid stats">${statCard("Tổng số học sinh",students.length,"","users","purple","Tài khoản học sinh trên hệ thống")}${statCard("Đề ôn tập",data.assignments.length,"","book","green","Đề bạn đã tạo hoặc giao")}${statCard("Điểm trung bình",average,"","chart","orange","Trên các lượt đã chấm")}${statCard("Bài đã hoàn thành",allAttempts.length,"","target","blue","Lịch sử đã đồng bộ")}</div>
   <div class="grid content-grid"><section class="card section-card"><div class="section-heading"><div><h2>Tiến bộ của lớp</h2><p>Điểm các lượt luyện tập đã chấm</p></div><div class="chart-legend"><span><i class="legend-dot"></i>Điểm số</span></div></div>${scoreChart(scored.slice(-6).map(attempt=>attempt.score))}</section>
   <section class="card section-card"><div class="section-heading"><div><h2>Hoạt động gần đây</h2><p>Cập nhật từ các lượt làm bài đã đồng bộ</p></div><button class="text-button" data-page="compare">Xem tất cả</button></div><div class="activity-list">${activities.length?activities.map(attempt=>{const student=students.find(user=>user.id===attempt.userId);return `<div class="activity"><div class="avatar">${initial(student?.name||"HS")}</div><div class="activity-main"><strong>${safe(student?.name||"Học sinh")} đã hoàn thành ${safe(attempt.title)}</strong><span>${timesAgo(attempt.createdAt)}</span></div><span class="activity-score">${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</span></div>`}).join(""):`<div class="empty">Chưa có lượt làm bài được đồng bộ.</div>`}</div></section></div>
@@ -1025,12 +1058,17 @@ function assignmentList(assignments) {
 function progressPage(user) {
   const stats=userStats(user);
   const personalAttempts=sortAttempts(stats.attempts.filter(attempt=>attempt.source==="personal"));
+  const assignedAttempts=sortAttempts(stats.attempts.filter(attempt=>attempt.source!=="personal"));
   const personalScores=personalAttempts.map(attempt=>attempt.score).filter(Number.isFinite);
   const latest=personalAttempts.at(-1),latestMistakes=latest?.mistakes||[0,0,0,0,0,0,0];
+  const isTeacherViewingStudent=isTeacher()&&user.id!==session?.id;
+  const historySection=isTeacherViewingStudent
+    ?`<div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử tự luyện</h2><p>${personalAttempts.length} lượt tự luyện · Mở từng lượt để xem câu trả lời, đáp án và kết quả</p></div></div>${attemptTable(personalAttempts)}</div><div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử đề giáo viên giao</h2><p>${assignedAttempts.length} lượt làm đề được giao</p></div></div>${attemptTable(assignedAttempts)}</div>`
+    :`<div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử tất cả bài làm</h2><p>Gồm đề tự luyện và đề giáo viên giao · Mở từng lượt để xem câu trả lời, đáp án và kết quả</p></div></div>${attemptTable(stats.attempts)}</div>`;
   return `${welcome("Lộ trình cá nhân","Theo dõi lượt tự luyện và xem lại mọi câu trong các bài đã làm.")}
   <div class="grid stats">${statCard("Đề tự luyện",personalAttempts.length,"","book","purple","Số lượt đã hoàn thành")}${statCard("Điểm tự luyện trung bình",personalScores.length?avg(personalScores):"—","","chart","green","Chỉ tính đề tự luyện")}${statCard("Điểm tự luyện gần nhất",latest&&Number.isFinite(latest.score)?`${latest.score}/10`:"—","","target","orange","Đề mới nhất")}${statCard("Nhóm lỗi đề mới nhất",latest?topError(latestMistakes)[1]:"Chưa có","","target","blue","Tên nhóm đầy đủ")}</div>
   ${personalPracticeEvaluation(personalAttempts)}
-  <div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử tất cả bài làm</h2><p>Gồm đề tự luyện và đề giáo viên giao · Mở từng lượt để xem câu trả lời, đáp án và kết quả</p></div></div>${attemptTable(stats.attempts)}</div>`;
+  ${historySection}`;
 }
 function attemptTable(attempts) {
   const historyNotice=attemptHistoryState==="error"?`<div class="notice">Không tải được lịch sử mới nhất: ${safe(attemptHistoryError)} <button class="text-button" data-action="retry-attempt-history">Thử tải lại</button></div>`:"";
@@ -1039,7 +1077,7 @@ function attemptTable(attempts) {
     if(attemptHistoryState==="error")return `${historyNotice}<div class="empty">Chưa thể xác định lịch sử bài làm. Hãy thử tải lại.</div>`;
     return `<div class="empty">Các bài luyện tập hoàn thành sẽ xuất hiện tại đây.<br/><br/><button class="btn" data-page="home">Chọn đề ôn tập</button></div>`;
   }
-  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td>${new Date(a.createdAt).toLocaleDateString("vi-VN")}</td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
+  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN LÀM</th><th>THỜI ĐIỂM HOÀN THÀNH (24H)</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td><time datetime="${safe(typeof a.createdAt==="string"?a.createdAt:"")}">${formatAttemptTimestamp(a.createdAt)}</time></td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 function formatDuration(seconds) { return `${Math.floor(seconds/60)} phút ${seconds%60} giây`; }
 function formatAttemptAnswer(value) {
@@ -1108,7 +1146,7 @@ async function showAttemptReview(attempt) {
     return;
   }
   if(!reviewQuestions?.length) {
-    showModal(`Xem lại: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("book")}</div><strong>Lượt làm cũ chưa lưu chi tiết từng câu</strong><p>Hệ thống trước đây chỉ lưu điểm tổng và số câu sai theo nhóm, nên không thể khôi phục câu hỏi hoặc lựa chọn bạn đã trả lời cho lượt này.</p><div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span>Số câu đúng <b>${attempt.correct}/${attempt.graded??attempt.total}</b></span><span>Ngày làm <b>${new Date(attempt.createdAt).toLocaleDateString("vi-VN")}</b></span></div></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
+    showModal(`Xem lại: ${safe(attempt.title)}`,`<div class="attempt-review-unavailable"><div class="attempt-review-empty-icon">${icon("book")}</div><strong>Lượt làm cũ chưa lưu chi tiết từng câu</strong><p>Hệ thống trước đây chỉ lưu điểm tổng và số câu sai theo nhóm, nên không thể khôi phục câu hỏi hoặc lựa chọn bạn đã trả lời cho lượt này.</p><div class="attempt-review-summary"><span>Điểm <b>${Number.isFinite(attempt.score)?`${attempt.score}/10`:"Chưa chấm"}</b></span><span>Số câu đúng <b>${attempt.correct}/${attempt.graded??attempt.total}</b></span><span>Thời điểm <b>${formatAttemptTimestamp(attempt.createdAt)}</b></span></div></div>`,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
     document.querySelector(".modal")?.classList.add("modal-attempt-review");
     return;
   }
@@ -1117,14 +1155,14 @@ async function showAttemptReview(attempt) {
   const ungraded=reviewQuestions.length-correct-incorrect;
   const gradedReview=reviewQuestions.filter(hasAnswerKey).length;
   const reviewedScore=gradedReview?Math.round(correct/gradedReview*100)/10:null;
-  const body=`<div class="attempt-review-summary"><span>Điểm đối chiếu <b>${reviewedScore===null?"Chưa chấm":`${reviewedScore}/10`}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>${formatDuration(attempt.duration)}</span></div><p class="subhead">Điểm xem lại được tính từ đáp án và câu trả lời đã lưu.</p><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
+  const body=`<div class="attempt-review-summary"><span>Điểm đối chiếu <b>${reviewedScore===null?"Chưa chấm":`${reviewedScore}/10`}</b></span><span class="review-count-correct">Đúng <b>${correct}</b></span><span class="review-count-incorrect">Sai <b>${incorrect}</b></span>${ungraded?`<span>Chưa chấm <b>${ungraded}</b></span>`:""}<span>Thời gian làm <b>${formatDuration(attempt.duration)}</b></span><span>Hoàn thành <b>${formatAttemptTimestamp(attempt.createdAt)}</b></span></div><p class="subhead">Điểm xem lại được tính từ đáp án và câu trả lời đã lưu.</p><div class="attempt-review-list">${reviewQuestions.map((question,index)=>attemptReviewQuestionMarkup(question,index)).join("")}</div>`;
   showModal(`Xem lại bài: ${safe(attempt.title)}`,body,`<button class="btn secondary" data-action="close-modal">Đóng</button>`);
   document.querySelector(".modal")?.classList.add("modal-attempt-review");
   void typesetMath(document.querySelector(".modal"));
 }
 function comparePage() {
   if(isTeacher()&&selectedStudent) {
-    const u=data.users.find(x=>x.id===selectedStudent);if(u)return `${welcome(`Lộ trình của ${safe(u.name)}`,"Phân tích tiến bộ và gợi ý hỗ trợ theo từng nhóm lỗi.",`<button class="btn secondary" data-action="back-students">← Danh sách học sinh</button><button class="btn" data-action="assign-priority" data-id="${u.id}">${icon("plus")} Giao đề ưu tiên</button>`)}${progressPage(u)}`;
+    const u=data.users.find(x=>x.id===selectedStudent);if(u)return `${welcome(`Lộ trình của ${safe(u.name)}`,"Phân tích tiến bộ và gợi ý hỗ trợ theo từng nhóm lỗi.",`<button class="btn secondary" data-action="back-students">← Danh sách học sinh</button><button class="btn secondary" data-action="refresh-teacher-progress">Làm mới</button><button class="btn" data-action="assign-priority" data-id="${u.id}">${icon("plus")} Giao đề ưu tiên</button>`)}${teacherProgressStatus()}${progressPage(u)}`;
   }
   const users=isTeacher()?data.users.filter(u=>u.role==="student"):[session];
   if(!isTeacher()) {
@@ -1133,7 +1171,7 @@ function comparePage() {
     const latestMistakes=attempts.at(-1)?.mistakes||[0,0,0,0,0,0,0];
     return `${welcome("Tiến bộ qua đề tự luyện","So sánh từng đề mới với đề ngay trước đó. Số lỗi không bị cộng dồn qua nhiều lượt.")}<div class="grid stats">${statCard("Đề tự luyện",attempts.length,"","book","purple","Số lượt đã hoàn thành")}${statCard("Điểm gần nhất",scores.length?scores[scores.length-1]:"—","", "chart","green","Trên thang điểm 10")}${statCard("Điểm trung bình",scores.length?avg(scores):"—","","target","orange","Chỉ tính đề tự luyện")}${statCard("Nhóm cần ôn",topError(latestMistakes)[1],"","target","blue","Tên nhóm đầy đủ")}</div>${personalPracticeEvaluation(attempts)}<div class="card section-card" style="margin-top:16px"><div class="section-heading"><div><h2>Lịch sử đề tự luyện</h2><p>${attempts.length} lượt hoàn thành · Chọn một đề để xem lại từng câu</p></div></div>${attemptTable(attempts)}</div>`;
   }
-  return `${welcome("So sánh tiến bộ học sinh","Xem sự thay đổi kết quả và xác định phần kiến thức cần ưu tiên.")}<div class="card section-card"><div class="section-heading"><div><h2>Danh sách học sinh</h2><p>Chọn một học sinh để xem lộ trình chi tiết.</p></div></div>${studentsTable(users,true)}</div>`;
+  return `${welcome("So sánh tiến bộ học sinh","Xem lịch sử tự luyện, câu đúng/sai và thời điểm làm bài của từng học sinh.",`<button class="btn" data-action="refresh-teacher-progress">${icon("clock")} Làm mới tiến độ</button>`)}${teacherProgressStatus()}<div class="card section-card"><div class="section-heading"><div><h2>Danh sách học sinh</h2><p>Chọn “Xem tiến độ” để mở lịch sử tự luyện chi tiết.</p></div></div>${studentsTable(users,true)}</div>`;
 }
 function studentsPage() {
   const students=data.users.filter(user=>user.role==="student");
@@ -1158,7 +1196,7 @@ function studentManagementTable(users,disabled=false) {
 }
 function studentsTable(users,clickable) {
   if(!users.length)return `<div class="empty">Chưa có dữ liệu học sinh.</div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>ĐỀ TỰ LUYỆN</th><th>ĐIỂM TB TỰ LUYỆN</th><th>NHÓM LỖI ĐỀ MỚI NHẤT</th><th>ĐIỂM GẦN NHẤT</th></tr></thead><tbody>${users.map(user=>{const personal=sortAttempts(userStats(user).attempts.filter(attempt=>attempt.source==="personal")),scores=personal.map(attempt=>attempt.score).filter(Number.isFinite),latest=personal.at(-1),worst=latest?topError(latest.mistakes||[0,0,0,0,0,0,0]):null;return `<tr ${clickable?`data-action="select-student" data-id="${safe(user.id)}" style="cursor:pointer"`:""}><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td>${personal.length} đề</td><td><strong>${scores.length?avg(scores):"—"}</strong>${scores.length?"/10":""}</td><td>${worst?`<span class="priority">${safe(worst[1])}</span>`:"Chưa tự luyện"}</td><td>${latest&&Number.isFinite(latest.score)?`${latest.score}/10`:"—"}</td></tr>`}).join("")}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>HỌC SINH</th><th>ĐỀ TỰ LUYỆN</th><th>ĐIỂM TB TỰ LUYỆN</th><th>NHÓM LỖI ĐỀ MỚI NHẤT</th><th>ĐIỂM GẦN NHẤT</th>${clickable?"<th>CHI TIẾT</th>":""}</tr></thead><tbody>${users.map(user=>{const personal=sortAttempts(userStats(user).attempts.filter(attempt=>attempt.source==="personal")),scores=personal.map(attempt=>attempt.score).filter(Number.isFinite),latest=personal.at(-1),worst=latest?topError(latest.mistakes||[0,0,0,0,0,0,0]):null;return `<tr ${clickable?`data-action="select-student" data-id="${safe(user.id)}" style="cursor:pointer"`:""}><td><div class="student-cell"><div class="avatar">${initial(user.name)}</div><div><strong>${safe(user.name)}</strong><div style="font-size:8px;color:#9aa3b3;margin-top:3px">${safe(user.email)}</div></div></div></td><td>${personal.length} đề</td><td><strong>${scores.length?avg(scores):"—"}</strong>${scores.length?"/10":""}</td><td>${worst?`<span class="priority">${safe(worst[1])}</span>`:"Chưa tự luyện"}</td><td>${latest&&Number.isFinite(latest.score)?`${latest.score}/10`:"—"}</td>${clickable?`<td><button class="text-button" type="button" data-action="select-student" data-id="${safe(user.id)}">Xem tiến độ →</button></td>`:""}</tr>`}).join("")}</tbody></table></div>`;
 }
 function errorsPage() {
   const teacher=isTeacher();
@@ -1201,7 +1239,10 @@ function personalPage() {
 function bindApp() {
   document.querySelectorAll("[data-page]").forEach(b=>b.onclick=()=>{
     currentPage=b.dataset.page;selectedStudent=null;render();
-    if(["students","compare"].includes(currentPage)&&isTeacher())void loadFirebaseStudents();
+    if(["students","compare"].includes(currentPage)&&isTeacher()) {
+      void loadFirebaseStudents({forceServer:true});
+      if(currentPage==="compare")void loadFirebaseAttempts({forceServer:true});
+    }
   });
   document.querySelectorAll("[data-action]").forEach(b=>b.addEventListener("click",event=>{event.stopPropagation();void handleAction(b);}));
   document.querySelector("#global-search")?.addEventListener("input",e=>{
@@ -1403,10 +1444,19 @@ async function handleAction(button) {
     return;
   }
   if(action==="retry-attempt-history"){
-    await loadFirebaseAttempts();
+    await loadFirebaseAttempts({forceServer:true});
     return;
   }
-  if(action==="select-student"){selectedStudent=id;currentPage="compare";render();return;}
+  if(action==="refresh-teacher-progress"){
+    if(!isTeacher()){toast("Chỉ giáo viên mới xem được tiến độ của toàn bộ học sinh.");return;}
+    const [studentsLoaded,attemptsLoaded]=await Promise.all([
+      loadFirebaseStudents({forceServer:true}),
+      loadFirebaseAttempts({forceServer:true})
+    ]);
+    if(studentsLoaded&&attemptsLoaded)toast("Đã tải lại danh sách học sinh và lịch sử tự luyện từ máy chủ.");
+    return;
+  }
+  if(action==="select-student"){selectedStudent=id;currentPage="compare";render();if(session?.source==="firebase")void loadFirebaseAttempts({forceServer:true});return;}
   if(action==="back-students"){selectedStudent=null;currentPage="students";render();return;}
   if(action==="assign-priority"){
     if(await loadFirebaseStudents())showExamModal(false,id);
@@ -1433,11 +1483,20 @@ async function handleAction(button) {
     currentPractice=null;currentPage=practiceReturnPage;render();return;
   }
 }
-async function loadFirebaseStudents() {
+async function loadFirebaseStudents({forceServer=false}={}) {
   if(!isTeacher())return false;
+  const userId=session?.id;
+  studentDirectoryState="loading";
+  studentDirectoryError="";
+  if(["home","students","compare"].includes(currentPage)&&!currentPractice&&!document.querySelector(".modal-backdrop"))render();
   try {
     await configureFirestore();
-    const snapshot=await firebaseSdk.getDocs(firebaseSdk.collection(firebaseDb,"users"));
+    if(session?.id!==userId)return false;
+    const users=firebaseSdk.collection(firebaseDb,"users");
+    const snapshot=await firebaseRequest(forceServer&&firebaseSdk.getDocsFromServer
+      ?firebaseSdk.getDocsFromServer(users)
+      :firebaseSdk.getDocs(users));
+    if(session?.id!==userId)return false;
     const localById=new Map(data.users.map(user=>[user.id,user]));
     data.users=snapshot.docs.map(doc=>{
       const profile=doc.data(),local=localById.get(doc.id);
@@ -1448,10 +1507,13 @@ async function loadFirebaseStudents() {
         deleteAfter:profile.deleteAfter?.toDate?.().toISOString?.()||profile.deleteAfter||null
       };
     }).filter(user=>user.role==="student"||user.role==="teacher");
+    studentDirectoryState="ready";
     render();
     return true;
   } catch(error) {
     console.error("Could not load Firebase student profiles.",error);
+    studentDirectoryState="error";
+    studentDirectoryError=firebaseFirestoreError(error);
     data.users=data.users.filter(user=>user.source==="firebase"||(user.id===session?.id&&user.role==="student"));
     render();
     toast(firebaseFirestoreError(error));
