@@ -1,5 +1,15 @@
 {
   "projects": {
     "default": "toan-199ee"
-  }
+  },
+  "targets": {
+    "toan-199ee": {
+      "hosting": {
+        "public": [
+          "toanhoc-365"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }
