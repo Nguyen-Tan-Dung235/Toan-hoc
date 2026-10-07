@@ -139,7 +139,7 @@ function loadFirebaseLocalAttemptCache(userId) {
     return [];
   }
 }
-function clearFirebaseLocalAccountData(userId) {
+function clearFirebaseLocalAttemptHistory(userId) {
   const uid=String(userId||"");
   if(!uid)return;
   try { localStorage.removeItem(localAttemptCacheKey(uid)); }
@@ -152,6 +152,32 @@ function clearFirebaseLocalAccountData(userId) {
       localStorage.setItem(STORE_KEY,JSON.stringify(saved));
     }
   } catch(error) { console.warn("Could not clear this account's legacy local attempts.",error); }
+}
+function removeFirebaseLocalAttempt(userId,attemptId) {
+  const uid=String(userId||""),id=String(attemptId||"");
+  if(!uid||!id)return false;
+  const before=data.attempts.length;
+  data.attempts=data.attempts.filter(attempt=>!(attempt?.userId===uid&&attempt?.id===id));
+  try {
+    const cacheKey=localAttemptCacheKey(uid);
+    const cached=JSON.parse(localStorage.getItem(cacheKey)||"[]");
+    const remaining=Array.isArray(cached)?cached.filter(attempt=>attempt?.id!==id):[];
+    if(remaining.length)localStorage.setItem(cacheKey,JSON.stringify(remaining));
+    else localStorage.removeItem(cacheKey);
+  } catch(error) { console.warn("Could not remove this attempt from the local account cache.",error); }
+  try {
+    const saved=JSON.parse(localStorage.getItem(STORE_KEY)||"null");
+    if(saved&&Array.isArray(saved.attempts)) {
+      saved.attempts=saved.attempts.filter(attempt=>!(attempt?.userId===uid&&attempt?.id===id));
+      localStorage.setItem(STORE_KEY,JSON.stringify(saved));
+    }
+  } catch(error) { console.warn("Could not remove this attempt from legacy local history.",error); }
+  return data.attempts.length<before;
+}
+function clearFirebaseLocalAccountData(userId) {
+  const uid=String(userId||"");
+  if(!uid)return;
+  clearFirebaseLocalAttemptHistory(uid);
   if(session?.source==="firebase"&&session.id===uid) {
     if(session.role==="teacher"||session.role==="owner") {
       legacyErrorDocs=[];
@@ -334,8 +360,29 @@ async function deleteFirebaseDocuments(documents) {
   }
 }
 async function deleteFirebaseChildCollection(parentRef,collectionName) {
-  const children=await firebaseRequest(firebaseSdk.getDocs(firebaseSdk.collection(parentRef,collectionName)));
+  const children=await firebaseRequest(firebaseSdk.getDocsFromServer(firebaseSdk.collection(parentRef,collectionName)));
   await deleteFirebaseDocuments(children.docs);
+}
+async function deleteFirebaseStudentAttempt(userId,attemptId) {
+  await configureFirestore();
+  const uid=String(userId||""),id=String(attemptId||"");
+  if(!uid||!id||session?.source!=="firebase"||session.role!=="student"||session.id!==uid) {
+    throw new Error("Chỉ học sinh đang đăng nhập mới có thể xóa bài làm của mình.");
+  }
+  const pendingWrite=pendingAttemptWrites.get(id);
+  if(pendingWrite)await pendingWrite.catch(error=>console.warn("A pending attempt could not sync before deletion.",error));
+  if(session?.id!==uid||session?.source!=="firebase")throw new Error("Phiên đăng nhập đã thay đổi. Hãy tải lại trang rồi thử lại.");
+  const ref=firebaseSdk.doc(firebaseDb,"attempts",id);
+  const snapshot=await firebaseRequest(firebaseSdk.getDocFromServer(ref));
+  let removedLocal=false;
+  if(snapshot.exists()) {
+    if(snapshot.data().userId!==uid)throw new Error("Không thể xóa bài làm của tài khoản khác.");
+    await deleteFirebaseChildCollection(ref,"questions");
+    await firebaseRequest(firebaseSdk.deleteDoc(ref));
+  }
+  removedLocal=removeFirebaseLocalAttempt(uid,id);
+  saveData();
+  return snapshot.exists()||removedLocal;
 }
 async function purgeFirebaseDataInClient(userId) {
   await configureFirestore();
@@ -831,7 +878,7 @@ function render() {
         ${sidebar()}
         <main class="main">
           <header class="topbar">
-            <div class="breadcrumb"><button class="icon-button mobile-menu" data-action="menu">${icon("menu")}</button> Không gian học tập <span> / </span> <b>${pageTitle()}</b></div>
+            <div class="breadcrumb"><button class="icon-button mobile-menu" data-action="menu" aria-label="Mở menu">${icon("menu")}</button> Không gian học tập <span> / </span> <b>${pageTitle()}</b></div>
             <div class="top-actions"><div class="search">${icon("search")}<input id="global-search" placeholder="Tìm kiếm..." /></div><button class="icon-button" title="Thông báo">${icon("bell")}<i class="notification-dot"></i></button></div>
           </header>
           <div class="page-content"></div>
@@ -1387,7 +1434,8 @@ function attemptTable(attempts) {
     if(attemptHistoryState==="error")return `${historyNotice}<div class="empty">Chưa thể xác định lịch sử bài làm. Hãy thử tải lại.</div>`;
     return `<div class="empty">Các bài luyện tập hoàn thành sẽ xuất hiện tại đây.<br/><br/><button class="btn" data-page="home">Chọn đề ôn tập</button></div>`;
   }
-  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN LÀM</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td><time datetime="${safe(typeof a.createdAt==="string"?a.createdAt:"")}">${formatAttemptTimestamp(a.createdAt)}</time></td><td><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button></td></tr>`).join("")}</tbody></table></div>`;
+  const canDeleteOwnAttempts=session?.source==="firebase"&&session.role==="student";
+  return `${historyNotice}<div class="table-wrap"><table><thead><tr><th>BÀI ÔN TẬP</th><th>LOẠI ĐỀ</th><th>ĐIỂM</th><th>SỐ CÂU ĐÚNG</th><th>THỜI GIAN LÀM</th><th>NGÀY LÀM</th><th></th></tr></thead><tbody>${attempts.slice().reverse().map(a=>`<tr><td><strong>${safe(a.title)}</strong></td><td>${a.source==="teacher"?"Giáo viên giao":"Tự luyện"}</td><td><b>${Number.isFinite(a.score)?`${a.score}/10`:"Chưa chấm"}</b></td><td>${a.correct}/${a.graded??a.total}</td><td>${formatDuration(a.duration)}</td><td><time datetime="${safe(typeof a.createdAt==="string"?a.createdAt:"")}">${formatAttemptTimestamp(a.createdAt)}</time></td><td><div class="attempt-actions"><button class="text-button attempt-review-button" type="button" data-action="review-attempt" data-id="${safe(a.id)}">Xem lại →</button>${canDeleteOwnAttempts&&a.userId===session.id?`<button class="text-button danger-text" type="button" data-action="delete-own-attempt" data-id="${safe(a.id)}" aria-label="Xóa bài ${safe(a.title)}">Xóa</button>`:""}</div></td></tr>`).join("")}</tbody></table></div>`;
 }
 function formatDuration(seconds) { return `${Math.floor(seconds/60)} phút ${seconds%60} giây`; }
 function formatAttemptAnswer(value) {
@@ -1551,6 +1599,8 @@ function bindApp() {
   if(root.__appEventsBound)return;
   root.__appEventsBound=true;
   root.addEventListener("click",event=>{
+    const openSidebar=root.querySelector(".sidebar.show-mobile");
+    if(openSidebar&&!openSidebar.contains(event.target)&&!event.target.closest(".mobile-menu"))openSidebar.classList.remove("show-mobile");
     const action=event.target.closest("[data-action]");
     if(action&&root.contains(action)) {
       event.stopPropagation();
@@ -1560,6 +1610,7 @@ function bindApp() {
     const page=event.target.closest("[data-page]");
     if(!page||!root.contains(page))return;
     const nextPage=page.dataset.page;
+    root.querySelector(".sidebar")?.classList.remove("show-mobile");
     if(currentPage===nextPage&&!selectedStudent)return;
     currentPage=nextPage;
     selectedStudent=null;
@@ -1652,6 +1703,41 @@ async function handleAction(button) {
       console.error("Could not migrate old local error documents.",error);
       button.disabled=false;button.textContent="Chuyển vào tài khoản này";
       toast(`Chưa chuyển hết tài liệu: ${firebaseFirestoreError(error)}. Bạn có thể thử lại; các bản đã chuyển sẽ không bị nhân đôi.`);
+    }
+    return;
+  }
+  if(action==="delete-own-attempt") {
+    if(session?.source!=="firebase"||session.role!=="student") {
+      toast("Chỉ học sinh đăng nhập Firebase mới có thể xóa bài làm của mình.");
+      return;
+    }
+    const attempt=data.attempts.find(item=>item.id===id&&item.userId===session.id);
+    if(!attempt)return;
+    showModal("Xóa bài làm này?",`<p>Bài <strong>${safe(attempt.title)}</strong> và chi tiết câu trả lời của lượt này sẽ bị xóa vĩnh viễn. Các bài làm khác vẫn được giữ nguyên.</p><p class="notice">Tài khoản của bạn không bị ảnh hưởng. Giáo viên cũng sẽ không xem được lượt đã xóa này.</p>`,`<button class="btn secondary" data-action="close-modal">Hủy</button><button class="btn danger" data-action="confirm-delete-own-attempt" data-id="${safe(attempt.id)}">Xóa bài này</button>`);
+    return;
+  }
+  if(action==="confirm-delete-own-attempt") {
+    if(session?.source!=="firebase"||session.role!=="student")return;
+    const attempt=data.attempts.find(item=>item.id===id&&item.userId===session.id);
+    if(!attempt) {
+      document.querySelector(".modal-backdrop")?.remove();
+      return;
+    }
+    const userId=session.id;
+    button.disabled=true;
+    button.textContent="Đang xóa…";
+    try {
+      const deleted=await deleteFirebaseStudentAttempt(userId,id);
+      document.querySelector(".modal-backdrop")?.remove();
+      render();
+      toast(deleted?`Đã xóa bài “${attempt.title}” và chi tiết câu trả lời.`:"Bài làm đã được gỡ khỏi thiết bị này.");
+    } catch(error) {
+      console.error("Could not delete the student's attempt.",error);
+      document.querySelector(".modal-backdrop")?.remove();
+      removeFirebaseLocalAttempt(userId,id);
+      saveData();
+      if(session?.source==="firebase"&&session.id===userId)await loadFirebaseAttempts({forceServer:true});
+      toast(`Không xóa được bài làm: ${firebaseFirestoreError(error)}. Lịch sử đã được đồng bộ lại.`);
     }
     return;
   }

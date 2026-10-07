@@ -189,7 +189,8 @@ service cloud.firestore {
       allow update: if activeStudent()
         && resource.data.userId == request.auth.uid
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([]);
-      allow delete: if deletedProfile() && resource.data.userId == request.auth.uid;
+      allow delete: if (activeStudent() || deletedProfile())
+        && resource.data.userId == request.auth.uid;
 
       match /questions/{reviewQuestionId} {
         function parentAttempt() {
@@ -249,7 +250,7 @@ service cloud.firestore {
           && request.resource.data.questionTime is int
           && request.resource.data.questionTime >= 0;
         allow update: if false;
-        allow delete: if deletedProfile()
+        allow delete: if (activeStudent() || deletedProfile())
           && exists(/databases/$(database)/documents/attempts/$(attemptId))
           && parentAttempt().data.userId == request.auth.uid;
       }
