@@ -653,7 +653,7 @@ function render() {
   if(!session) { root.innerHTML=loginView(); bindLogin(); showLoginNotice(); return; }
   if(!isTeacher() && ["students","errors","teacher-exams"].includes(currentPage)) currentPage="home";
   root.innerHTML=`
-    <div class="shell">
+    <div class="shell${currentPage==="home"?" home-shell":""}">
       ${sidebar()}
       <main class="main">
         <header class="topbar">
@@ -933,7 +933,7 @@ function sidebar() {
   const navs=isTeacher()
     ? [["home","home","Tổng quan"],["teacher-exams","book","Đề ôn tập"],["students","users","Học sinh"],["compare","chart","So sánh tiến bộ"],["errors","target","7 nhóm lỗi"],["library","upload","Kho câu hỏi"]]
     : [["home","home","Đề ôn tập"],["progress","chart","Lộ trình cá nhân"],["compare","users","So sánh tiến bộ"],["personal","target","Ôn tập cá nhân hóa"],["library","upload","Kho câu hỏi"]];
-  return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon("spark")}</span> Toán học</div><div class="nav-label">KHÔNG GIAN HỌC</div><nav class="nav">${navs.map(([key,ico,label])=>`<button data-page="${key}" class="${currentPage===key?"active":""}">${icon(ico)}<span>${label}</span>${key==="errors"&&isTeacher()?'<span class="nav-badge">7</span>':""}</button>`).join("")}</nav><div class="sidebar-bottom"><div class="help-card"><strong>Cần hỗ trợ?</strong><p>Khám phá mẹo học tập và hướng dẫn sử dụng nền tảng.</p><button data-action="help">Xem hướng dẫn →</button></div><div class="profile"><div class="avatar">${initial(userName())}</div><div class="profile-copy"><strong>${safe(userName())}</strong><span>${session?.role==="owner"?"Chủ sở hữu":isTeacher()?"Giáo viên":"Học sinh"}</span></div><button class="logout" data-action="logout" title="Đăng xuất">${icon("logout")}</button></div></div></aside>`;
+  return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon("spark")}</span> Toán học</div><div class="nav-label">KHÔNG GIAN HỌC</div><nav class="nav">${navs.map(([key,ico,label])=>`<button data-page="${key}" class="${currentPage===key?"active":""}">${icon(ico)}<span>${label}</span>${key==="errors"&&isTeacher()?'<span class="nav-badge">7</span>':""}</button>`).join("")}</nav><div class="sidebar-bottom${currentPage==="home"?" home-sidebar-dock":""}"><div class="help-card"><strong>Cần hỗ trợ?</strong><p>Khám phá mẹo học tập và hướng dẫn sử dụng nền tảng.</p><button data-action="help">Xem hướng dẫn →</button></div><div class="profile"><div class="avatar">${initial(userName())}</div><div class="profile-copy"><strong>${safe(userName())}</strong><span>${session?.role==="owner"?"Chủ sở hữu":isTeacher()?"Giáo viên":"Học sinh"}</span></div><button class="logout" data-action="logout" title="Đăng xuất">${icon("logout")}</button></div></div></aside>`;
 }
 function mobileNav() {
   const entries=isTeacher()?[["home","home","Trang chủ"],["teacher-exams","book","Đề thi"],["students","users","Học sinh"],["compare","chart","Tiến bộ"]]:[["home","book","Đề ôn tập"],["progress","chart","Lộ trình"],["personal","target","Tự luyện"],["library","upload","Kho đề"]];

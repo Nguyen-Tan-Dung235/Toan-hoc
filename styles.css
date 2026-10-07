@@ -520,6 +520,55 @@ td { color:#466067; }
   .error-ordinal { padding:6px 7px; }
 }
 
+/* Keep the small support/account column visible while browsing the home page. */
+.sidebar .help-card {
+  border:1px solid #ffffff24;
+  background:#ffffff0d;
+}
+.sidebar .help-card strong { color:#f5fbff; }
+.sidebar .help-card p { color:#d1e7f5; }
+.sidebar .profile { border-top-color:#ffffff35; }
+.sidebar .profile-copy strong { color:#f5fbff; }
+.sidebar .profile-copy span { color:#c8deed; }
+.sidebar .logout { color:#e0f0fa; }
+.sidebar .logout:hover { color:#ffffff; }
+.home-sidebar-dock {
+  position:fixed;
+  right:22px;
+  bottom:20px;
+  z-index:12;
+  width:min(270px,calc(100vw - 32px));
+  margin:0;
+  padding:10px;
+  border:1px solid #c1e7ff66;
+  border-radius:20px;
+  background:linear-gradient(155deg,#164f79f5,#123e67f7);
+  box-shadow:0 18px 48px #092a4660,0 3px 10px #092a4629;
+  backdrop-filter:blur(16px);
+}
+.home-sidebar-dock .help-card { margin:0 0 12px; padding:15px 14px; }
+.home-sidebar-dock .help-card strong { font-size:13px; }
+.home-sidebar-dock .help-card p { font-size:11px; }
+.home-sidebar-dock .help-card button { font-size:12px; }
+.home-sidebar-dock .profile { padding:13px 5px 2px; }
+.home-sidebar-dock .profile-copy strong { font-size:13px; }
+.home-sidebar-dock .profile-copy span { font-size:11px; }
+.home-sidebar-dock .avatar { width:42px;height:42px;font-size:13px; }
+.home-sidebar-dock .logout svg { width:19px;height:19px; }
+@media(max-width:780px) {
+  .home-sidebar-dock {
+    position:static;
+    width:auto;
+    margin-top:auto;
+    padding:0;
+    border:0;
+    border-radius:0;
+    background:transparent;
+    box-shadow:none;
+    backdrop-filter:none;
+  }
+}
+
 .login-screen { min-height:100vh;background:#f5f8f7; }
 .login-art { padding:7vh 8%;background:radial-gradient(circle at 82% 13%,#d6eee6 0,transparent 31%),linear-gradient(145deg,#12383b,#183d43 56%,#21394a);color:#fff; }
 .login-art::before,.login-art::after { content:"";position:absolute;border:1px solid #ffffff17;border-radius:50%;pointer-events:none; }
